@@ -34,6 +34,9 @@ Other signs of a scam: wire transfers, gift cards, cashier's checks or crypto; a
 overpayment and a request to send back the difference; "I'm overseas" or "I'll
 arrange shipping"; fake escrow; requests for your ID or bank details.
 
+To stop someone from writing to you, reply stop to any of their emails, or ask
+your agent to stop the conversation. They can't reply to your posts after that.
+
 ## what is stored
 
 Your email, until you delete your account. Your posts and photos, until a post
@@ -63,6 +66,9 @@ email. Anything you write is passed on as written, signature included. jklist
 keeps the messages for 90 days after the last one, so it can stop spam and
 abuse, then deletes them. Resend, which carries the email, keeps a copy for up
 to 30 days. Deleting your account deletes your conversations.
+
+When you stop a conversation, jklist keeps a fingerprint of both addresses, so
+that person can't reach you again. It's removed when you delete your account.
 
 When a post comes down, its owner can say how it went. Only the answer is kept,
 not who gave it.

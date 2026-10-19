@@ -153,3 +153,46 @@ test("a conversation goes through private addresses both ways", async () => {
   await api(board, "delete_account", { code }, asker);
   assert.deepEqual((await api(board, "my_conversations", {}, poster)).body.conversations, []);
 });
+
+test("either side can stop a conversation, by email or by agent", async () => {
+  const poster = await signIn("quiet@example.com");
+  const { body: lamp } = await api(board, "publish_post", { kind: "offer", title: "Floor lamp", location: "Los Angeles" }, poster);
+  const { body: rug } = await api(board, "publish_post", { kind: "offer", title: "Wool rug", location: "Los Angeles" }, poster);
+  const pest = await signIn("pest@example.com");
+  await api(board, "reply_to_post", { id: lamp.id, message: "Hi" }, pest);
+  const fromPest = lastTo("quiet@example.com");
+  assert.match(fromPest.text, /reply with just the word stop/);
+
+  // The poster answers STOP from their inbox, with the history quoted below.
+  const count = sent.length;
+  inbox.set("s1", { from: "quiet@example.com", to: [fromPest.reply_to], text: "STOP\n\nOn Mon, jklist wrote:\n> Hi", headers: {} });
+  assert.equal((await webhook("s1")).status, 200);
+  assert.equal(sent.length, count + 1, "only a confirmation goes out");
+  assert.equal(sent.at(-1).to, "quiet@example.com");
+  assert.match(sent.at(-1).text, /You stopped this conversation/);
+  assert.equal(idempotencyKeys.at(-1), "stop-s1");
+
+  // After that nothing gets through, by email or by agent, and the pest can't start over.
+  const [conversation] = (await api(board, "my_conversations", {}, pest)).body.conversations;
+  assert.equal(conversation.stopped, true);
+  assert.equal((await api(board, "send_message", { conversation: conversation.id, message: "Why?" }, pest)).status, 403);
+  inbox.set("s2", { from: "pest@example.com", to: [`p-${conversation.id}@reply.test`], text: "Why??", headers: {} });
+  assert.equal((await webhook("s2")).status, 200);
+  assert.equal(sent.length, count + 1, "their emails are dropped");
+  const again = await api(board, "reply_to_post", { id: rug.id, message: "And the rug?" }, pest);
+  assert.equal(again.status, 403);
+  assert.match(again.body.error, /can't reach this person/, "turned away before a new conversation opens");
+
+  // The agent way, from the other side of another conversation.
+  const buyer = await signIn("buyer@example.com");
+  const { body: started } = await api(board, "reply_to_post", { id: rug.id, message: "Is it wool?" }, buyer);
+  assert.equal((await api(board, "stop_conversation", { conversation: started.conversation }, buyer)).body.stopped, true);
+  assert.equal((await api(board, "send_message", { conversation: started.conversation, message: "Yes, wool" }, poster)).status, 403);
+  assert.equal((await api(board, "stop_conversation", { conversation: started.conversation }, pest)).status, 404, "only the two people in it can stop it");
+
+  // The list keeps fingerprints, not anyone's email.
+  const db = board.db();
+  const rows = db.prepare("select * from blocks").all();
+  db.close();
+  assert.ok(rows.length >= 2 && !JSON.stringify(rows).includes("@"));
+});

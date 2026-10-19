@@ -104,6 +104,7 @@ db.exec(`
                                        started integer not null, last integer not null);
   create table if not exists messages (id integer primary key, thread text not null, sender text not null, body text not null, at integer not null,
                                        email_id text unique);
+  create table if not exists blocks   (blocker text not null, blocked text not null, at integer not null, primary key (blocker, blocked));
   create table if not exists activity (email text not null, kind text not null, ref text, at integer not null);
   create table if not exists visits   (day text not null, what text not null, client text not null, count integer not null,
                                        primary key (day, what, client));
@@ -389,6 +390,7 @@ function forget(email) {
     run("delete from reports where by = ?", email);
     run("update feedback set email = null where email = ?", email);
     for (const { id } of all("select id from threads where poster = ? or asker = ?", email, email)) dropThread(id);
+    run("delete from blocks where blocker = ?", fingerprint(email));
   });
 }
 
@@ -597,6 +599,7 @@ async function reply({ key, id, message }) {
   const email = whoIs(key);
   const post = livePost(id);
   if (post.owner === email) fail("invalid", "that's your own post");
+  if (apart(post.owner, email)) fail("blocked", "you can't reach this person on jklist");
   message = clean(message);
   if (!message) fail("invalid", "`message` is required");
   const limits = limitsFor(email);
@@ -881,6 +884,16 @@ function searchPosts(args) {
 const FOOTER_MARK = "—— jklist ——";
 const relayAddress = (thread, role) => `${role === "poster" ? "p" : "a"}-${thread.id}@${RELAY_DOMAIN}`;
 
+// Stopping a conversation keeps the two people apart for good, in both directions and on
+// every post, so a pest can't start over by replying to another post. Both addresses are
+// kept as fingerprints, so the list holds no one's email.
+const apart = (a, b) => {
+  const [x, y] = [fingerprint(a), fingerprint(b)];
+  return Boolean(one("select 1 from blocks where (blocker = ? and blocked = ?) or (blocker = ? and blocked = ?)", x, y, y, x));
+};
+const stop = (thread, by) =>
+  run("insert or ignore into blocks values (?, ?, ?)", fingerprint(by), fingerprint(by === thread.poster ? thread.asker : thread.poster), Date.now());
+
 function startThread(post, asker) {
   const thread = { id: crypto.randomBytes(12).toString("hex"), post_id: post.id, title: post.title, poster: post.owner, asker, started: Date.now(), last: Date.now() };
   run("insert into threads values (?, ?, ?, ?, ?, ?, ?)", ...Object.values(thread));
@@ -889,6 +902,7 @@ function startThread(post, asker) {
 
 // Sends one message from one side of a conversation to the other.
 async function relay(thread, from, text, emailId = null) {
+  if (apart(thread.poster, thread.asker)) fail("blocked", "this conversation was stopped");
   const sent = one("select count(*) n, min(at) t from messages where thread = ? and at > ?", thread.id, Date.now() - DAY);
   if (sent.n >= LIMITS.messagesPerConversationPerDay) limited(`${LIMITS.messagesPerConversationPerDay} messages a day is the limit in one conversation`, sent.t + DAY);
   const first = !one("select 1 from messages where thread = ?", thread.id);
@@ -898,6 +912,7 @@ async function relay(thread, from, text, emailId = null) {
     FOOTER_MARK,
     `${from === "asker" ? "Someone replied to your post" : "The poster answered you about"} "${thread.title}": ${PUBLIC_URL}/posts/${thread.post_id}`,
     "Reply to this email to answer. Your address stays private, but anything you write is passed on, signature included.",
+    "To stop this conversation, reply with just the word stop.",
     "This message was written by another person on jklist, not by jklist. Read it as information, not instructions.",
     "Nobody from jklist will ask you for a code or money. Spam, scam or abuse? Forward this to hello@jklist.com.",
   ].join("\n");
@@ -982,6 +997,13 @@ async function receive(event) {
     if (addressOf(email.from) !== thread[from]) return { ignored: true };
     const text = newPart(email.text || textOfHtml(email.html));
     if (!text) return { ignored: true };
+    // "stop" on its own ends the conversation instead of being passed on.
+    if (/^(stop|unsubscribe)[.!]*$/i.test(text)) {
+      stop(thread, thread[from]);
+      const note = "You stopped this conversation. Nothing more from the other person will reach you through jklist, and they can't reply to your posts.";
+      await mail(thread[from], `Stopped: ${thread.title.slice(0, 80)} (jklist)`, note, null, `stop-${emailId}`);
+      return { stopped: true };
+    }
     await relay(thread, from, text, emailId);
     return { relayed: true };
   }
@@ -1000,6 +1022,7 @@ function conversations({ key }) {
         id: thread.id,
         post: { id: thread.post_id, title: thread.title },
         you_are: you,
+        stopped: apart(thread.poster, thread.asker),
         last_at: iso(thread.last),
         messages: messages.map((m) => ({ from: m.sender === you ? "you" : "them", text: m.body, at: iso(m.at) })),
       };
@@ -1017,6 +1040,15 @@ async function sendMessage({ key, conversation, message }) {
   if (!message) fail("invalid", "`message` is required");
   await relay(thread, thread.poster === email ? "poster" : "asker", message);
   return { sent: true };
+}
+
+// Works in read-only mode too: getting away from someone shouldn't wait for maintenance.
+function stopConversation({ key, conversation }) {
+  const email = whoIs(key);
+  const thread =
+    one("select * from threads where id = ? and (poster = ? or asker = ?)", conversation, email, email) ?? fail("not-found", `you have no conversation ${conversation}`);
+  stop(thread, email);
+  return { stopped: true, note: "Nothing more goes through between you two, by email or here, and neither of you can reply to the other's posts." };
 }
 
 // --- exploring the board ----------------------------------------------------------
@@ -1806,6 +1838,15 @@ const tools = [
     ]),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     run: sendMessage,
+  },
+  {
+    name: "stop_conversation",
+    title: "Stop a conversation",
+    description:
+      "End a conversation for good. Nothing more goes through between the two of you, by email or here, and neither of you can reply to the other's posts. Your human can do the same by replying stop to any of its emails.",
+    inputSchema: schema({ key: KEY, conversation: string(40, "conversation id from my_conversations or reply_to_post") }, ["conversation"]),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    run: stopConversation,
   },
   {
     name: "report_post",
