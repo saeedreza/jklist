@@ -1476,14 +1476,18 @@ const jsonLd = (data) => `<script type="application/ld+json">${JSON.stringify(da
 
 // Cloudflare turns email addresses in HTML into a script, which agents don't run.
 // It leaves alone anything between email_off comments.
-// People read serif; agents and code get mono. `aside` is the agent guide below the
-// homepage, in a quieter color: there for agents, easy for people to skip. `mono` sets
-// a whole page that way. `body` is ready-made HTML in place of the rendered text.
+// People read the browser's sans-serif; agents and code get the system mono. `aside` is the agent
+// guide below the homepage, in a quieter color: there for agents, easy for people to skip.
+// `mono` sets a whole page that way. `body` is ready-made HTML in place of the rendered text.
 function html(text, { title, description, path, image, markdown, data, aside, body, mono, type = "website" } = {}) {
   title ??= text.split("\n")[0].replace(/^#\s*/, "");
   description ??= (text.split("\n\n")[1] || "").replace(/\s+/g, " ").trim();
   image ??= OG_IMAGE ? `${PUBLIC_URL}/og.png` : null;
   const url = path && `${PUBLIC_URL}${path}`;
+  const links = [
+    ...[["/", "jklist"], ["/rules", "rules"]].filter(([to]) => to !== path).map(([to, name]) => `<a href="${to}">${name}</a>`),
+    `<a href="${SOURCE_URL}">source</a>`,
+  ].join(" · ");
   const head = [
     `<title>${escape(title)}</title>`,
     `<meta name="description" content="${escape(description)}">`,
@@ -1508,29 +1512,18 @@ function html(text, { title, description, path, image, markdown, data, aside, bo
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 ${head.join("\n")}
 <style>
-body { max-width: 42rem; margin: 2rem auto; padding: 0 1rem; font: 18px/1.6 ui-serif, Georgia, serif; color: #111; background: #fff; overflow-wrap: break-word }
-h1 { font-size: 2.4rem; line-height: 1.1; margin: 2rem 0 1rem }
-h2 { font-size: 1.2rem; margin: 2.5rem 0 0.5rem }
-h3 { font-size: 1rem; margin: 2rem 0 0.25rem }
-ul, ol { padding-left: 1.5rem }
-blockquote { margin: 1rem 0; padding-left: 1rem; border-left: 3px solid #ddd }
-a { color: inherit }
-code, pre, nav, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace }
-code { font-size: 0.85em }
-pre, nav, .mono { font-size: 14px; line-height: 1.5 }
-pre { padding-left: 2ch; overflow-x: auto }
-pre code, .mono code { font-size: inherit }
-.mono h1, .mono h2, .mono h3 { font-size: inherit; margin: 2rem 0 0.5rem }
-.mono ul { padding-left: 2ch; list-style-type: "- " }
-nav, aside { color: #767676 }
-aside { margin-top: 6rem; padding-top: 1rem; border-top: 1px solid #eee }
+body { max-width: 42rem; margin: 2rem auto; padding: 0 1rem; font-family: sans-serif; background: #fff; overflow-wrap: break-word }
+pre, code, .mono { font-family: ui-monospace, Menlo, Consolas, monospace }
+pre, .mono { font-size: 14px }
+pre { overflow-x: auto }
+aside { color: #767676 }
 </style>
-<nav><a href="/">jklist</a> · <a href="/rules">rules</a> · <a href="${SOURCE_URL}">source</a></nav>
 <!--email_off-->
 <main${mono ? ' class="mono"' : ""}>
 ${body ?? render(text)}
 </main>
-${aside ? `<aside class="mono">\n${render(aside, 1)}\n</aside>\n` : ""}<!--/email_off-->
+<nav>${links}</nav>
+${aside ? `<hr>\n<aside class="mono">\n${render(aside, 1)}\n</aside>\n` : ""}<!--/email_off-->
 `;
 }
 
