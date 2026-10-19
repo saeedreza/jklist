@@ -1691,7 +1691,9 @@ function sitemap() {
     loc: `${PUBLIC_URL}/posts/${p.id}`,
     lastmod: iso(p.posted_at),
   }));
-  const urls = [...pages, ...posts].map(({ loc, lastmod }) => `<url><loc>${escape(loc)}</loc>${lastmod ? `<lastmod>${lastmod}</lastmod>` : ""}</url>`);
+  // The list of posts changes whenever a post goes up.
+  const list = { loc: `${PUBLIC_URL}/posts`, lastmod: posts[0]?.lastmod };
+  const urls = [...pages, list, ...posts].map(({ loc, lastmod }) => `<url><loc>${escape(loc)}</loc>${lastmod ? `<lastmod>${lastmod}</lastmod>` : ""}</url>`);
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>\n`;
 }
 

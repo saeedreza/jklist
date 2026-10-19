@@ -678,6 +678,7 @@ test("posts are a page of links, for agents that can only open links they've see
   assert.match(page, /<a href="\/posts\?kind=need">needs<\/a>/);
   assert.match(page, /<a href="\/posts\?cursor=[^"]+">next page<\/a>/);
   assert.match(page, new RegExp(`<link rel="canonical" href="${board.base}/posts">`));
+  assert.ok((await fetch(`${board.base}/sitemap.xml`).then((r) => r.text())).includes(`<loc>${board.base}/posts</loc>`), "the list is in the sitemap");
 
   const search = await fetch(`${board.base}/posts?q=ladder&kind=offer`, { headers: { accept: "text/html" } }).then((r) => r.text());
   assert.match(search, /<h1>posts matching “ladder”<\/h1>/);
