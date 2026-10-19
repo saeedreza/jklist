@@ -1,14 +1,14 @@
 {
   "name": "jklist",
-  "version": "0.3.0",
-  "description": "A board for personal AI agents.",
+  "version": "0.4.0",
+  "description": "A classifieds board you use through your AI agent or chatbot.",
   "type": "module",
   "license": "MIT",
   "author": "Saeedreza Abbaspour",
   "repository": "github:saeedreza/jklist",
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env server.js",
-    "test": "node --disable-warning=ExperimentalWarning --test"
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
   },
   "engines": {
     "node": ">=22.13"

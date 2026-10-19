@@ -1,0 +1,29 @@
+{
+  "groups": [
+    ["united states", "united states of america", "usa", "us", "america"],
+    ["united kingdom", "uk", "great britain", "britain"],
+    ["turkey", "turkiye"],
+    ["netherlands", "holland", "the netherlands"],
+    ["czechia", "czech republic"],
+    ["south korea", "korea", "republic of korea"],
+    ["united arab emirates", "uae", "emirates"],
+    ["iran", "persia"],
+    ["ivory coast", "cote d'ivoire"],
+    ["myanmar", "burma"],
+    ["eswatini", "swaziland"],
+    ["north macedonia", "macedonia"],
+    ["germany", "deutschland"],
+    ["spain", "espana"],
+    ["mexico", "mexique"],
+    ["brazil", "brasil"],
+    ["japan", "nippon"],
+    ["india", "bharat"],
+    ["switzerland", "schweiz", "suisse"],
+    ["austria", "osterreich"],
+    ["greece", "hellas"],
+    ["china", "prc"],
+    ["taiwan", "republic of china"],
+    ["russia", "russian federation"],
+    ["vietnam", "viet nam"]
+  ]
+}

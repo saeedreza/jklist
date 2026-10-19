@@ -2,80 +2,18 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
-import net from "node:net";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
-
-const root = path.join(import.meta.dirname, "..");
-
-async function until(check, ms = 5000) {
-  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 25))) {
-    const value = await check();
-    if (value) return value;
-  }
-  throw new Error("timed out");
-}
-
-const freePort = () =>
-  new Promise((resolve) => {
-    const probe = net.createServer().listen(0, () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-
-async function start(settings = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jklist-test-"));
-  const port = await freePort();
-  const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "server.js"], {
-    cwd: root,
-    env: {
-      ...process.env,
-      PORT: String(port),
-      PUBLIC_URL: `http://127.0.0.1:${port}`,
-      DB_FILE: `${dir}/jklist.db`,
-      UPLOADS_DIR: `${dir}/uploads`,
-      BACKUP_DIR: `${dir}/backups`,
-      RESEND_API_KEY: "",
-      ORIGIN_SECRET: "",
-      READ_ONLY: "",
-      ADMIN_EMAILS: "admin@example.com",
-      ...settings,
-    },
-  });
-  let output = "";
-  child.stdout.on("data", (chunk) => (output += chunk));
-  child.stderr.on("data", (chunk) => (output += chunk));
-  const base = `http://127.0.0.1:${port}`;
-  await until(() => fetch(`${base}/health`).then(() => true, () => false));
-  return {
-    base,
-    dir,
-    output: () => output,
-    db: () => new DatabaseSync(`${dir}/jklist.db`),
-    stop() {
-      child.kill();
-      fs.rmSync(dir, { recursive: true, force: true });
-    },
-  };
-}
+import { api, start, until } from "./helpers.js";
 
 let board;
 before(async () => (board = await start()));
 after(() => board.stop());
 
-async function call(name, args = {}, key, server = board) {
-  const res = await fetch(`${server.base}/api/${name}`, {
-    method: "POST",
-    headers: key ? { authorization: `Bearer ${key}` } : {},
-    body: JSON.stringify(args),
-  });
-  return { status: res.status, body: await res.json() };
-}
+const call = (name, args, key, server = board) => api(server, name, args, key);
 
 async function mcp(message, key) {
   const res = await fetch(`${board.base}/mcp`, {
@@ -86,9 +24,9 @@ async function mcp(message, key) {
   return { status: res.status, body: res.status === 202 ? null : await res.json() };
 }
 
-// Without RESEND_API_KEY the server prints each code instead of emailing it.
+// Without RESEND_API_KEY the server prints each email instead of sending it.
 const codesSent = (server, email) =>
-  [...server.output().matchAll(/would email (\S+)\]\njklist code: (\d{6})/g)].filter((m) => m[1] === email).map((m) => m[2]);
+  [...server.output().matchAll(/would email (\S+?)(?:,[^\]]*)?\]\njklist code: (\d{6})/g)].filter((m) => m[1] === email).map((m) => m[2]);
 
 async function requestCode(email, server = board) {
   const inbox = email.toLowerCase();
@@ -97,27 +35,55 @@ async function requestCode(email, server = board) {
   return until(() => codesSent(server, inbox)[before]);
 }
 
-async function signIn(email, server = board) {
-  const code = await requestCode(email, server);
-  return (await call("sign_in", { email, code }, undefined, server)).body.key;
+// Accounts are a month old unless a test asks for a fresh one, since limits grow with age.
+async function signIn(email, { fresh = false } = {}) {
+  const code = await requestCode(email);
+  const { key } = (await call("sign_in", { email, code })).body;
+  if (!fresh) age(email, 30);
+  return key;
 }
 
-const post = async (key, fields) => (await call("publish_post", fields, key)).body;
+function age(email, days) {
+  const db = board.db();
+  db.prepare("update people set joined = ? where email = ?").run(Date.now() - days * 86_400_000, email.toLowerCase());
+  db.close();
+}
+
+const post = async (key, fields) => (await call("publish_post", { kind: "offer", location: "Los Angeles, CA, USA", ...fields }, key)).body;
+const titles = (result) => result.body.posts.map((p) => p.title);
 
 test("pages are plain text for agents and html for browsers", async () => {
   const text = await fetch(`${board.base}/`);
   assert.match(text.headers.get("content-type"), /^text\/plain/);
-  assert.match(await text.text(), /^# jklist/);
+  const homeText = await text.text();
+  assert.match(homeText, /^# jklist\n\nA classifieds board/);
+  assert.match(homeText, /# jklist for agents/, "agents get the whole guide from the homepage");
 
   const html = await fetch(`${board.base}/`, { headers: { accept: "text/html" } });
   assert.match(html.headers.get("content-type"), /^text\/html/);
   assert.equal(html.headers.get("vary"), "accept");
   const page = await html.text();
-  assert.match(page, /<title>jklist<\/title>/);
+  assert.match(page, /<title>jklist: a classifieds board you use through your AI agent<\/title>/);
+  assert.match(page, /<aside class="mono">\n<h2>jklist for agents<\/h2>/, "the agent guide sits below, quieter");
+  assert.match(page, /<h1>jklist<\/h1>/);
+  assert.match(page, new RegExp(`<link rel="canonical" href="${board.base}/">`));
+  assert.match(page, /<meta property="og:image" content="[^"]+\/og\.png">/);
+  assert.match(page, /"@type":"WebSite"/);
   assert.match(page, /<!--email_off-->/);
+  const rules = await fetch(`${board.base}/rules`, { headers: { accept: "text/html" } }).then((r) => r.text());
+  assert.match(rules, /<ol><li>You must be 18 or older\.<\/li>/, "lists are real lists");
 
-  for (const page of ["/rules", "/rules.md", "/llms.txt", "/index.md", "/robots.txt", "/sitemap.xml"])
-    assert.equal((await fetch(board.base + page)).status, 200, page);
+  const textVersion = await fetch(`${board.base}/rules.md`);
+  assert.equal(textVersion.headers.get("link"), `<${board.base}/rules>; rel="canonical"`);
+  const llms = await fetch(`${board.base}/llms.txt`).then((r) => r.text());
+  assert.match(llms, /^# jklist\n\n> A classifieds board you use through your AI agent/);
+  assert.match(await fetch(`${board.base}/robots.txt`).then((r) => r.text()), /Disallow: \/api\//);
+  const icon = await fetch(`${board.base}/favicon.ico`);
+  assert.equal(icon.headers.get("content-type"), "image/svg+xml");
+  assert.equal((await fetch(`${board.base}/og.png`)).headers.get("content-type"), "image/png");
+
+  for (const address of ["/agents", "/agents.md", "/rules", "/rules.md", "/llms.txt", "/index.md", "/robots.txt", "/sitemap.xml"])
+    assert.equal((await fetch(board.base + address)).status, 200, address);
   assert.equal((await fetch(`${board.base}/`, { method: "HEAD" })).status, 200);
   assert.equal((await fetch(`${board.base}/nope`)).status, 404);
 });
@@ -132,10 +98,11 @@ test("addresses that aren't pages still answer sensibly", async () => {
 
   const missing = await fetch(`${board.base}/nope`, { headers: { accept: "text/html" } });
   assert.equal(missing.status, 404);
-  assert.match(await missing.text(), /<title>not found<\/title>/);
+  const missingPage = await missing.text();
+  assert.match(missingPage, /<title>Not found · jklist<\/title>/);
+  assert.match(missingPage, /<meta name="robots" content="noindex">/);
   assert.match((await fetch(`${board.base}/nope`).then((r) => r.json())).error, /^not-found/);
 
-  assert.equal((await fetch(`${board.base}/favicon.ico`)).status, 204);
   assert.match(await fetch(`${board.base}/.well-known/security.txt`).then((r) => r.text()), /^Contact: mailto:hello@jklist\.com/);
   assert.equal(await fetch(`${board.base}/health`).then((r) => r.text()), "ok");
 });
@@ -154,81 +121,236 @@ test("signing in trades a code from the inbox for a key", async () => {
   assert.equal((await call("my_posts", {}, "jk_nope")).status, 401);
 });
 
-test("a post needs a title and known categories, and loses invisible characters", async () => {
+test("input is checked against the schema agents see", async () => {
   const key = await signIn("writer@example.com");
-  assert.equal((await call("publish_post", { body: "no title" }, key)).status, 400);
-  assert.equal((await call("publish_post", { title: "x".repeat(121) }, key)).status, 400);
-  assert.equal((await call("publish_post", { title: "x", categories: ["spaceships"] }, key)).status, 400);
+  const refused = async (fields, pattern) => {
+    const res = await call("publish_post", fields, key);
+    assert.equal(res.status, 400, JSON.stringify(fields));
+    assert.match(res.body.error, pattern);
+  };
+  await refused({ kind: "offer", location: "LA" }, /`title` is required/);
+  await refused({ title: "Desk", location: "LA" }, /`kind` is required/);
+  await refused({ kind: "sell", title: "Desk", location: "LA" }, /`kind` must be one of need, offer, trade/);
+  await refused({ kind: "offer", title: { a: 1 }, location: "LA" }, /`title` must be text/);
+  await refused({ kind: "offer", title: "x".repeat(121), location: "LA" }, /`title` is over 120 characters/);
+  await refused({ kind: "offer", title: "Desk", location: "LA", categories: ["stuff"] }, /unknown field `categories`/);
+  await refused({ kind: "offer", title: "Desk", location: "LA", days: 1.5 }, /`days` must be a whole number/);
+  await refused({ kind: "offer", title: "Desk" }, /say where it happens/);
+  assert.equal((await call("search_posts", { limit: null })).status, 200, "null means not given");
+  assert.equal((await call("send_feedback", { message: "x", kind: null })).status, 200);
+  const defaulted = await post(key, { title: "Null days", days: null });
+  assert.ok(Date.parse(defaulted.expires_at) > Date.now() + 29 * 86_400_000);
+  assert.equal((await call("search_posts", { limit: 1.5 })).status, 400);
+  assert.equal((await call("search_posts", { limit: 0 })).status, 400);
 
   const made = await post(key, { title: "Oak​ desk‮,\n  barely used", location: " Silver Lake,  Los Angeles " });
   assert.equal(made.title, "Oak desk, barely used");
   assert.equal(made.location, "Silver Lake, Los Angeles");
-  assert.deepEqual(made.categories, ["other"]);
+  assert.equal(made.kind, "offer");
+  assert.match(made.url, /\/posts\/[0-9a-f]{8}$/);
 });
 
-test("search finds by words, place and category, and never shows contacts", async () => {
+test("search finds synonyms, word forms and metro areas, and shows the other side", async () => {
   const key = await signIn("seller@example.com");
-  await post(key, { title: "Green sofa", body: "Three seats. ".repeat(30), location: "Echo Park, Los Angeles, CA, USA", contact: "seller@example.com", categories: ["stuff"] });
-  await post(key, { title: "Ableton lessons", body: "Online, I fix websites in return", categories: ["lessons", "services"] });
-  await post(key, { title: "Room for a week", location: "Lisbon, Portugal", categories: ["housing"] });
+  await post(key, { kind: "offer", title: "Green sofa, barely used", body: "Three seats. ".repeat(30), location: "Santa Monica, CA, USA", contact: "seller@example.com" });
+  const buyer = await signIn("buyer@example.com");
+  const couch = await post(buyer, { kind: "need", title: "Looking for a couch for my new flat", location: "Echo Park, Los Angeles, CA, USA" });
+  await post(key, { kind: "trade", title: "Teach me Ableton, I'll fix your website", remote: true, location: "" });
+  await post(key, { kind: "offer", title: "Room for a week", location: "Lisbon, Portugal" });
 
-  const sofa = (await call("search_posts", { q: "green sofa" })).body.posts;
-  assert.deepEqual(sofa.map((p) => p.title), ["Green sofa"]);
-  assert.ok(!("contact" in sofa[0]));
-  assert.ok(sofa[0].snippet.endsWith("…") && sofa[0].snippet.length === 201);
+  const couches = await call("search_posts", { q: "couch", kind: "offer", location: "Los Angeles" });
+  assert.deepEqual(titles(couches), ["Green sofa, barely used"], "a sofa in Santa Monica answers someone needing a couch in LA");
+  const sofa = couches.body.posts[0];
+  assert.ok(!("contact" in sofa));
+  assert.ok(sofa.snippet.endsWith("…") && sofa.snippet.length === 201);
 
-  const inLA = (await call("search_posts", { location: "los angeles" })).body.posts.map((p) => p.title);
-  assert.ok(inLA.includes("Green sofa") && inLA.includes("Ableton lessons"), "posts without a location match any place");
+  const needs = titles(await call("search_posts", { kind: "need" }));
+  assert.ok(needs.includes("Looking for a couch for my new flat") && needs.includes("Teach me Ableton, I'll fix your website"), "trades show for both sides");
+  assert.ok(!needs.includes("Green sofa, barely used"));
+
+  const inLA = titles(await call("search_posts", { location: "LA" }));
+  assert.ok(inLA.includes("Green sofa, barely used") && inLA.includes("Teach me Ableton, I'll fix your website"), "LA means Los Angeles; remote posts match anywhere");
   assert.ok(!inLA.includes("Room for a week"));
+  assert.ok(inLA.indexOf("Green sofa, barely used") < inLA.indexOf("Teach me Ableton, I'll fix your website"), "posts in the place come before newer remote ones");
+  assert.ok(!titles(await call("search_posts", { location: "La Jolla" })).includes("Green sofa, barely used"), "La Jolla isn't LA");
 
-  const lessons = (await call("search_posts", { category: "lessons" })).body.posts;
-  assert.deepEqual(lessons.map((p) => p.title), ["Ableton lessons"]);
-  assert.equal((await call("search_posts", { category: "spaceships" })).status, 400);
+  assert.equal(titles(await call("search_posts", { q: "green sofa" }))[0], "Green sofa, barely used", "the closest match comes first");
+
+  const matches = titles(await call("find_matches", { id: couch.id }));
+  assert.ok(matches.includes("Green sofa, barely used"), "a need finds the offer that fits");
+  assert.ok(!matches.includes("Room for a week") && !matches.includes("Looking for a couch for my new flat"));
+  const la = (await call("places", { q: "santa" })).body.areas.find((a) => a.name === "los angeles");
+  assert.ok(la?.places.includes("santa monica") && la.live_posts >= 2, "the board knows Santa Monica is in LA");
+  const summary = (await call("board_summary", {})).body;
+  assert.ok(summary.by_kind.need >= 1 && summary.by_kind.offer >= 1 && summary.top_places.some((p) => p.place === "los angeles"));
+
+  await post(key, { kind: "offer", title: "Hand-woven kilim from Istanbul", tags: ["Rug", "carpet", "textile", "rug"], remote: true });
+  assert.deepEqual(titles(await call("search_posts", { q: "textile" })), ["Hand-woven kilim from Istanbul"], "the poster's agent added search terms");
+  assert.deepEqual((await call("search_posts", { q: "textile" })).body.posts[0].tags, undefined, "results stay short");
+  assert.equal((await call("publish_post", { kind: "offer", title: "x", remote: true, tags: Array(31).fill("a") }, key)).status, 400);
+  assert.deepEqual(titles(await call("search_posts", { q: "spaceship" })), []);
+  assert.match((await call("search_posts", { q: "spaceship" })).body.note, /Nothing matched/);
+  assert.deepEqual(titles(await call("search_posts", { since: new Date(Date.now() + 60_000).toISOString() })), []);
+  assert.equal((await call("search_posts", { since: "yesterday" })).status, 400);
 });
 
 test("pages of results cover every post once, even posts made in the same millisecond", async () => {
-  const key = await signIn("pager@example.com");
   const db = board.db();
-  const now = Date.now();
+  const moment = Date.now() - 500;
   for (const id of ["aaaa0001", "aaaa0002", "aaaa0003", "aaaa0004", "aaaa0005"])
-    db.prepare("insert into posts (id, owner, title, categories, images, posted_at, expires_at) values (?, ?, ?, '[\"events\"]', '[]', ?, ?)").run(
+    db.prepare("insert into posts (id, owner, kind, title, remote, images, posted_at, expires_at) values (?, 'pager@example.com', 'offer', ?, 1, '[]', ?, ?)").run(
       id,
-      "pager@example.com",
       `same moment ${id}`,
-      now + 60_000,
-      now + 3_600_000,
+      moment,
+      Date.now() + 3_600_000,
     );
   db.close();
 
-  const seen = [];
-  let before;
-  do {
-    const page = (await call("search_posts", { q: "same moment", limit: 2, before }, key)).body;
-    seen.push(...page.posts.map((p) => p.id));
-    before = page.next;
-  } while (before);
-  assert.deepEqual(seen, ["aaaa0005", "aaaa0004", "aaaa0003", "aaaa0002", "aaaa0001"]);
+  for (const query of [{ since: new Date(moment - 1).toISOString() }, { q: "same moment" }]) {
+    const seen = [];
+    let cursor;
+    do {
+      const page = (await call("search_posts", { ...query, limit: 2, cursor })).body;
+      seen.push(...page.posts.map((p) => p.id));
+      cursor = page.next ?? undefined;
+    } while (cursor);
+    assert.deepEqual(seen.filter((id) => id.startsWith("aaaa")).sort(), ["aaaa0001", "aaaa0002", "aaaa0003", "aaaa0004", "aaaa0005"], JSON.stringify(query));
+    assert.equal(new Set(seen).size, seen.length, "nothing repeats");
+  }
+
+  // A post published between pages doesn't push one onto the next page twice.
+  const first = (await call("search_posts", { q: "same moment", limit: 2 })).body;
+  const key = await signIn("interrupter@example.com");
+  await post(key, { title: "same moment newcomer", remote: true });
+  const second = (await call("search_posts", { q: "same moment", limit: 2, cursor: first.next })).body;
+  assert.ok(!second.posts.some((p) => first.posts.some((q) => q.id === p.id)), "no repeats after a new post");
+  assert.equal((await call("search_posts", { cursor: "nonsense" })).status, 400);
 });
 
-test("the contact needs a key", async () => {
+test("expired posts disappear at once, not at the next cleanup", async () => {
+  const key = await signIn("expiring@example.com");
+  const { id } = await post(key, { title: "Expiring lamp" });
+  const db = board.db();
+  db.prepare("update posts set expires_at = ? where id = ?").run(Date.now() - 1, id);
+  db.close();
+  assert.equal((await fetch(`${board.base}/posts/${id}`)).status, 404);
+  assert.deepEqual(titles(await call("search_posts", { q: "expiring lamp" })), []);
+  assert.equal((await call("my_posts", {}, key)).body.posts.find((p) => p.id === id).expired, true);
+});
+
+test("the contact needs a key, and a post has a page you can share", async () => {
   const key = await signIn("poster@example.com");
-  const { id } = await post(key, { title: "Drummer wanted", contact: "call 555-0100" });
+  const { id } = await post(key, {
+    kind: "need",
+    title: "Drummer wanted",
+    body: "Bring sticks.\n\n# Not a heading <b>loud</b>\nDemo: https://example.com/demo.",
+    contact: "call 555-0100",
+  });
   const reader = await signIn("reader@example.com");
 
   const anonymous = await fetch(`${board.base}/posts/${id}`).then((r) => r.json());
   assert.ok(!("contact" in anonymous.post));
   const signedIn = await fetch(`${board.base}/posts/${id}`, { headers: { authorization: `Bearer ${reader}` } }).then((r) => r.json());
   assert.equal(signedIn.post.contact, "call 555-0100");
+
+  const page = await fetch(`${board.base}/posts/${id}`, { headers: { accept: "text/html" } }).then((r) => r.text());
+  assert.match(page, /<title>Drummer wanted · jklist<\/title>/);
+  assert.match(page, /"@type":"Demand"/);
+  assert.match(page, new RegExp(`<link rel="canonical" href="${board.base}/posts/${id}">`));
+  assert.ok((await fetch(`${board.base}/sitemap.xml`).then((r) => r.text())).includes(`<loc>${board.base}/posts/${id}</loc>`), "live posts are in the sitemap");
+  assert.match(page, new RegExp(`reply to post ${id}`));
+  assert.ok(
+    page.includes('<p># Not a heading &lt;b&gt;loud&lt;/b&gt;<br>Demo: <a href="https://example.com/demo" rel="ugc nofollow">https://example.com/demo</a>.</p>'),
+    "what people write stays text, and its links are marked as theirs",
+  );
+  assert.ok(!page.includes("555-0100"), "the page never shows the contact");
 });
 
-test("three reports hide a post until an admin restores it, and bans remove everything", async () => {
+test("limits grow with an account's age, and admins aren't limited", async () => {
+  const newbie = await signIn("newbie@example.com", { fresh: true });
+  await post(newbie, { title: "First thing" });
+  await post(newbie, { title: "Second thing" });
+  const third = await call("publish_post", { kind: "offer", title: "Third thing", remote: true }, newbie);
+  assert.equal(third.status, 429);
+  assert.match(third.body.error, /2 live posts is your limit for now; it grows to 5 at .+ Try again at .+ \(in \d+/);
+  assert.ok(third.body.retry_after > 0 && Date.parse(third.body.retry_at) > Date.now(), "limits say when they free up");
+  const raw = await fetch(`${board.base}/api/publish_post`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${newbie}` },
+    body: JSON.stringify({ kind: "offer", title: "Third thing", remote: true }),
+  });
+  assert.ok(Number(raw.headers.get("retry-after")) > 0);
+  age("newbie@example.com", 2);
+  assert.equal((await call("publish_post", { kind: "offer", title: "Third thing", remote: true }, newbie)).status, 200, "a day later the limit is higher");
+
+  const admin = await signIn("admin@example.com");
+  age("admin@example.com", 0);
+  for (const n of [1, 2, 3]) assert.equal((await call("publish_post", { kind: "offer", title: `Seed post ${n}`, remote: true }, admin)).status, 200);
+});
+
+test("publishing the same post twice returns the first one", async () => {
+  const key = await signIn("retry@example.com");
+  const first = await post(key, { title: "Bike for sale", body: "Blue" });
+  const again = await post(key, { title: "Bike for sale", body: "Blue" });
+  assert.equal(again.id, first.id);
+  assert.equal(again.duplicate, true);
+  assert.equal((await call("my_posts", {}, key)).body.posts.length, 1);
+});
+
+test("replies go to the poster by email, with the sender's address to answer", async () => {
+  const owner = await signIn("lamp-owner@example.com");
+  const { id } = await post(owner, { title: "Brass lamp" });
+  const asker = await signIn("asker@example.com");
+
+  assert.equal((await call("reply_to_post", { id, message: "Is it still available?" }, owner)).status, 400, "not to your own post");
+  const sent = await call("reply_to_post", { id, message: "Is it still available?" }, asker);
+  assert.equal(sent.body.sent, true);
+  assert.match(board.output(), /would email lamp-owner@example\.com, reply-to asker@example\.com\]\nReply to your jklist post: Brass lamp/);
+  assert.equal((await call("my_posts", {}, owner)).body.posts[0].replies, 1);
+
+  await call("reply_to_post", { id, message: "Hello?" }, asker);
+  await call("reply_to_post", { id, message: "Hello??" }, asker);
+  assert.equal((await call("reply_to_post", { id, message: "Hello???" }, asker)).status, 429);
+
+  // Replies sent all at once still stop at the limit.
+  const { id: other } = await post(owner, { title: "Brass candlestick" });
+  const burst = await Promise.all(Array.from({ length: 8 }, (_, n) => call("reply_to_post", { id: other, message: `Offer ${n}` }, asker)));
+  assert.equal(burst.filter((r) => r.status === 200).length, 3);
+});
+
+test("updating, renewing and closing posts", async () => {
+  const key = await signIn("editor@example.com");
+  const { id } = await post(key, { title: "Old title", days: 2 });
+  const updated = (await call("update_post", { id, title: "New title", days: 10 }, key)).body;
+  assert.equal(updated.title, "New title");
+  assert.ok(Date.parse(updated.expires_at) > Date.now() + 9 * 86_400_000);
+  assert.equal((await call("update_post", { id, location: "", remote: false }, key)).status, 400, "it still has to say where");
+  assert.equal((await call("update_post", { id, title: "Hijacked" }, await signIn("other@example.com"))).status, 404);
+
+  await call("delete_post", { id, outcome: "found_here" }, key);
+  const admin = await signIn("admin@example.com");
+  const outcomes = (await call("admin", { action: "overview" }, admin)).body.outcomes;
+  assert.ok(outcomes.some((o) => o.outcome === "found_here" && o.kind === "offer"));
+});
+
+test("reports hide a post only when established accounts send them", async () => {
   const owner = await signIn("owner@example.com");
   const admin = await signIn("admin@example.com");
   const { id } = await post(owner, { title: "Suspicious offer" });
-  for (const email of ["r1@example.com", "r2@example.com", "r3@example.com"]) await call("report_post", { id }, await signIn(email));
+  const reporters = ["r1@example.com", "r2@example.com", "r3@example.com"];
+  const keys = [];
+  for (const email of reporters) keys.push(await signIn(email, { fresh: true }));
 
+  for (const key of keys) await call("report_post", { id }, key);
+  assert.equal((await fetch(`${board.base}/posts/${id}`)).status, 200, "three brand-new accounts can't hide a post");
+
+  for (const email of reporters) age(email, 2);
+  const db = board.db();
+  db.prepare("delete from reports where post_id = ?").run(id);
+  db.close();
+  for (const key of keys) await call("report_post", { id }, key);
   assert.equal((await fetch(`${board.base}/posts/${id}`)).status, 404);
-  assert.equal((await call("my_posts", {}, owner)).body.find((p) => p.id === id).hidden, true);
+  assert.equal((await call("my_posts", {}, owner)).body.posts.find((p) => p.id === id).hidden, true);
 
   const listed = async (key) => (await mcp({ jsonrpc: "2.0", id: 1, method: "tools/list" }, key)).body.result.tools.map((t) => t.name);
   assert.ok(!(await listed(owner)).includes("admin"));
@@ -236,7 +358,7 @@ test("three reports hide a post until an admin restores it, and bans remove ever
   assert.equal((await call("admin", { action: "overview" }, owner)).status, 401);
   assert.equal((await call("admin", { action: "toString" }, admin)).status, 400);
 
-  const reported = (await call("admin", { action: "reports" }, admin)).body;
+  const reported = (await call("admin", { action: "reports" }, admin)).body.reports;
   assert.equal(reported.find((r) => r.post?.id === id).reports.length, 3);
   await call("admin", { action: "restore_post", id }, admin);
   assert.equal((await fetch(`${board.base}/posts/${id}`)).status, 200);
@@ -305,9 +427,10 @@ const upload = (bytes, key) =>
     body: await r.json(),
   }));
 
-test("uploads lose their metadata, and deleting the post deletes them", async () => {
+test("uploads lose their metadata, belong to their owner, and go when no post uses them", async () => {
   const key = await signIn("photos@example.com");
   assert.equal((await upload(Buffer.from("not an image"), key)).status, 400);
+  assert.equal((await upload(Buffer.from("GIF89a....COMMENTSECRET"), key)).status, 400, "gif isn't accepted");
   assert.equal((await upload(jpegWithMetadata(), "jk_nope")).status, 401);
 
   const jpg = (await upload(jpegWithMetadata(), key)).body.url;
@@ -320,40 +443,85 @@ test("uploads lose their metadata, and deleting the post deletes them", async ()
   const png = (await upload(pngWithMetadata(), key)).body.url;
   assert.ok(!Buffer.from(await fetch(png).then((r) => r.arrayBuffer())).includes("SECRET"));
 
-  const { id } = await post(key, { title: "Lamp", images: [jpg, png] });
-  await call("delete_post", { id }, key);
+  const stranger = await signIn("stranger@example.com");
+  for (const disguised of [jpg, jpg.replace("127.0.0.1", "localhost"), jpg.replace("http://", "https://")]) {
+    const stolen = await call("publish_post", { kind: "offer", title: "Not mine", remote: true, images: [disguised] }, stranger);
+    assert.match(stolen.body.error, /isn't one of your uploads/, disguised);
+  }
+
+  const first = await post(key, { title: "Lamp", images: [jpg, png] });
+  const second = await post(key, { title: "Lamp, again", images: [jpg] });
+  const page = await fetch(`${board.base}/posts/${first.id}`, { headers: { accept: "text/html" } }).then((r) => r.text());
+  assert.ok(page.includes(`<meta property="og:image" content="${jpg}">`), "the shared page previews the first photo");
+
+  await call("update_post", { id: first.id, images: [jpg] }, key);
+  assert.equal((await fetch(png)).status, 404, "a photo taken off a post is deleted");
+  await call("delete_post", { id: first.id }, key);
+  assert.equal((await fetch(jpg)).status, 200, "still used by the other post");
+  await call("delete_post", { id: second.id }, key);
   assert.equal((await fetch(jpg)).status, 404);
-  assert.equal((await fetch(png)).status, 404);
+
+  // A row whose file is gone, as after restoring an older backup, doesn't take the server down.
+  const lost = (await upload(pngWithMetadata(), key)).body.url;
+  fs.rmSync(`${board.dir}/uploads/${lost.split("/").pop()}`);
+  await fetch(lost).then((r) => r.arrayBuffer()).catch(() => {});
+  assert.equal(await fetch(`${board.base}/health`).then((r) => r.text()), "ok");
 });
 
-test("signing out everywhere and deleting the account", async () => {
-  const first = await signIn("leaving@example.com");
-  await post(first, { title: "Goodbye sale" });
-  assert.deepEqual((await call("sign_out_everywhere", {}, first)).body, { signed_out: true });
-  assert.equal((await call("my_posts", {}, first)).status, 401);
-
-  const second = await signIn("leaving@example.com");
-  await call("delete_account", {}, second);
-  assert.equal((await call("search_posts", { q: "goodbye sale" })).body.posts.length, 0);
+test("deleted text doesn't linger in the search index", async () => {
+  const key = await signIn("forgetful@example.com");
+  const { id } = await post(key, { title: "Zyxwvutsrq lamp", body: "call 555-0199" });
+  await call("delete_post", { id }, key);
+  const db = board.db();
+  const left = db.prepare("select count(*) n from posts_fts_data where instr(block, cast('zyxwvutsrq' as blob)) > 0").get().n;
+  db.close();
+  assert.equal(left, 0);
 });
 
-test("mcp handshake, notifications and batches", async () => {
+test("signing out one key, signing out everywhere, and deleting the account", async () => {
+  const laptop = await signIn("leaving@example.com");
+  const phone = await signIn("leaving@example.com");
+  await call("sign_out", {}, laptop);
+  assert.equal((await call("my_posts", {}, laptop)).status, 401);
+  assert.equal((await call("my_posts", {}, phone)).status, 200);
+
+  await post(phone, { title: "Goodbye sale" });
+  assert.equal((await call("delete_account", {}, phone)).status, 400, "deleting needs a code from the inbox");
+  const code = await requestCode("leaving@example.com");
+  assert.deepEqual((await call("delete_account", { code }, phone)).body, { deleted: true });
+  assert.equal((await call("my_posts", {}, phone)).status, 401);
+  assert.ok(!titles(await call("search_posts", { q: "goodbye sale" })).includes("Goodbye sale"));
+
+  const again = await signIn("leaving2@example.com");
+  assert.deepEqual((await call("sign_out_everywhere", {}, again)).body, { signed_out: true });
+  assert.equal((await call("my_posts", {}, again)).status, 401);
+});
+
+test("mcp handshake, versions, structured results and tool hints", async () => {
   const hello = await mcp({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } });
+  assert.equal(hello.body.result.protocolVersion, "2025-06-18");
   assert.equal(hello.body.result.serverInfo.name, "jklist");
   assert.match(hello.body.result.instructions, /^# jklist/);
+  const future = await mcp({ jsonrpc: "2.0", id: 2, method: "initialize", params: { protocolVersion: "2099-01-01" } });
+  assert.equal(future.body.result.protocolVersion, "2025-11-25", "an unknown version gets our newest, not an echo");
   assert.equal((await mcp({ jsonrpc: "2.0", method: "notifications/initialized" })).status, 202);
 
-  const called = await mcp({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "search_posts", arguments: { q: "sofa" } } });
-  assert.ok(Array.isArray(JSON.parse(called.body.result.content[0].text).posts));
+  const tools = (await mcp({ jsonrpc: "2.0", id: 3, method: "tools/list" })).body.result.tools;
+  const hint = (name) => tools.find((t) => t.name === name).annotations;
+  assert.equal(hint("search_posts").readOnlyHint, true);
+  assert.equal(hint("delete_account").destructiveHint, true);
+
+  const called = await mcp({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "search_posts", arguments: { q: "sofa" } } });
+  assert.ok(Array.isArray(called.body.result.structuredContent.posts));
+  assert.deepEqual(JSON.parse(called.body.result.content[0].text), called.body.result.structuredContent);
+  const bad = await mcp({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "search_posts", arguments: { limit: "lots" } } });
+  assert.equal(bad.body.result.isError, true);
 
   const tooMany = Array.from({ length: 21 }, (_, id) => ({ jsonrpc: "2.0", id, method: "ping" }));
   assert.equal((await mcp(tooMany)).status, 400);
 });
 
 test("feedback reaches admins, signed in or not", async () => {
-  const tools = (await mcp({ jsonrpc: "2.0", id: 1, method: "tools/list" })).body.result.tools.map((t) => t.name);
-  assert.ok(tools.includes("send_feedback"));
-
   assert.equal((await call("send_feedback", { kind: "bug", message: "search ignores accents" })).status, 200);
   assert.equal((await call("send_feedback", { kind: "rant", message: "x" })).status, 400);
   assert.equal((await call("send_feedback", { message: "  " })).status, 400);
@@ -361,7 +529,7 @@ test("feedback reaches admins, signed in or not", async () => {
   await call("send_feedback", { kind: "idea", message: "add a price field" }, key);
 
   const admin = await signIn("admin@example.com");
-  const received = (await call("admin", { action: "feedback" }, admin)).body;
+  const received = (await call("admin", { action: "feedback" }, admin)).body.feedback;
   assert.ok(received.some((f) => f.message === "add a price field" && f.email === "feedback@example.com"));
   assert.ok(received.some((f) => f.message === "search ignores accents" && f.email === null));
   assert.equal((await call("admin", { action: "feedback" }, key)).status, 401);
@@ -408,6 +576,21 @@ test("the origin lock and read-only mode", async () => {
     assert.equal((await fetch(`${locked.base}/posts`, { headers: through })).status, 200);
   } finally {
     locked.stop();
+  }
+});
+
+test("www goes to the bare domain, and IndexNow can check its key", async () => {
+  const server = await start({ INDEXNOW_KEY: "0123456789abcdef0123456789abcdef" });
+  try {
+    const { host } = new URL(server.base);
+    const redirect = await new Promise((resolve, reject) =>
+      http.get(`${server.base}/rules?x=1`, { headers: { host: `www.${host}` } }, resolve).on("error", reject),
+    );
+    assert.equal(redirect.statusCode, 301);
+    assert.equal(redirect.headers.location, `${server.base}/rules?x=1`);
+    assert.equal(await fetch(`${server.base}/0123456789abcdef0123456789abcdef.txt`).then((r) => r.text()), "0123456789abcdef0123456789abcdef");
+  } finally {
+    server.stop();
   }
 });
 
