@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up jklist every night
+
+[Timer]
+OnCalendar=*-*-* 10:30:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

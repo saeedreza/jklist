@@ -51,7 +51,7 @@ async function start(settings = {}) {
   child.stdout.on("data", (chunk) => (output += chunk));
   child.stderr.on("data", (chunk) => (output += chunk));
   const base = `http://127.0.0.1:${port}`;
-  await until(() => fetch(`${base}/health`).then((r) => r.ok, () => false));
+  await until(() => fetch(`${base}/health`).then(() => true, () => false));
   return {
     base,
     dir,
@@ -408,6 +408,21 @@ test("the origin lock and read-only mode", async () => {
     assert.equal((await fetch(`${locked.base}/posts`, { headers: through })).status, 200);
   } finally {
     locked.stop();
+  }
+});
+
+test("health fails when the off-site backup is late", async () => {
+  const stamp = path.join(os.tmpdir(), `jklist-stamp-${process.pid}`);
+  const watched = await start({ BACKUP_STAMP: stamp });
+  try {
+    const late = await fetch(`${watched.base}/health`);
+    assert.equal(late.status, 503);
+    assert.equal(await late.text(), "off-site backup is late");
+    fs.writeFileSync(stamp, "");
+    assert.equal((await fetch(`${watched.base}/health`)).status, 200);
+  } finally {
+    watched.stop();
+    fs.rmSync(stamp, { force: true });
   }
 });
 

@@ -1,0 +1,8 @@
+[Unit]
+Description=Copy jklist's database and photos to Cloudflare R2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/jklist/deploy/backup.sh

@@ -17,8 +17,8 @@ jklist is provided as is, with no warranty. You use it at your own risk.
 ## what is stored
 
 Your email, your posts and your photos, until a post expires (30 days) or you
-delete it. Deleting your account removes all of it, and daily backups age out
-after 7 days. None of it is sold or shared.
+delete it. Deleting your account removes it from the site at once, and from
+backups within 30 days. None of it is sold or shared.
 
 Location and camera details are removed from photos when they're uploaded.
 

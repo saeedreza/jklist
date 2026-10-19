@@ -19,6 +19,7 @@ const ADMINS = (env.ADMIN_EMAILS || "").toLowerCase().split(",").map((e) => e.tr
 const ORIGIN_SECRET = env.ORIGIN_SECRET;
 const READ_ONLY = env.READ_ONLY === "1";
 const SENTRY = env.SENTRY_DSN ? new URL(env.SENTRY_DSN) : null;
+const BACKUP_STAMP = env.BACKUP_STAMP;
 const SOURCE_URL = "https://github.com/saeedreza/jklist";
 
 const MINUTE = 60_000;
@@ -1061,15 +1062,26 @@ async function handle(req, res) {
   send(res, 404, { error: "not-found: nothing here; start at https://jklist.com" });
 }
 
+// Uptime checks hit /health. It fails if the database is unreachable, and, when
+// BACKUP_STAMP is set, if the nightly off-site backup hasn't finished in 36 hours.
+function health() {
+  try {
+    one("select 1");
+  } catch {
+    return "database unavailable";
+  }
+  if (BACKUP_STAMP) {
+    const done = fs.statSync(BACKUP_STAMP, { throwIfNoEntry: false })?.mtimeMs ?? 0;
+    if (Date.now() - done > 36 * HOUR) return "off-site backup is late";
+  }
+  return "ok";
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.url === "/health") {
-    try {
-      one("select 1");
-      return res.end("ok");
-    } catch {
-      res.writeHead(503);
-      return res.end("database unavailable");
-    }
+    const status = health();
+    res.writeHead(status === "ok" ? 200 : 503);
+    return res.end(status);
   }
   if (ORIGIN_SECRET && !fromCloudflare(req)) {
     res.writeHead(403);
