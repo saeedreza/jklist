@@ -18,7 +18,6 @@ const RESEND_API = (env.RESEND_API_URL || "https://api.resend.com").replace(/\/$
 const RESEND_WEBHOOK_SECRET = env.RESEND_WEBHOOK_SECRET;
 const RELAY_DOMAIN = env.RELAY_DOMAIN; // like reply.jklist.com; when set, conversations go through jklist
 const MAIL_FROM = env.MAIL_FROM || "jklist <hello@jklist.com>";
-const ANALYTICS_HTML = env.ANALYTICS_HTML || "";
 const ADMINS = (env.ADMIN_EMAILS || "").toLowerCase().split(",").map((e) => e.trim()).filter(Boolean);
 const ORIGIN_SECRET = env.ORIGIN_SECRET;
 const READ_ONLY = env.READ_ONLY === "1";
@@ -440,6 +439,25 @@ function full(row, { contact = false } = {}) {
   };
 }
 
+function publicationReceipt(post) {
+  return {
+    ...post,
+    receipt: {
+      status: "published",
+      url: post.url,
+      expires_at: post.expires_at,
+      replies: "Replies arrive by email and in your agent’s conversations.",
+      share_text: `${post.title}\n${post.url}\nGive this link to your agent to read the details and help you respond.`,
+      next_steps: [
+        "Show your human the published link and when the post closes.",
+        "Run find_matches for this post and offer to review any matches.",
+        "Offer the share_text for social media. Ask before sharing it anywhere.",
+        "Use update_post to edit or renew it, or delete_post to close it when finished.",
+      ],
+    },
+  };
+}
+
 const livePost = (id) =>
   one("select * from posts where id = ? and hidden = 0 and expires_at > ?", String(id), Date.now()) ??
   fail("not-found", `no post ${id}; it may have expired or been deleted`);
@@ -484,10 +502,11 @@ function publish({ key, days = LIMITS.defaultDays, ...input }) {
     Date.now() - LIMITS.duplicateWindow,
   );
   if (same) {
+    if (same.hidden) fail("blocked", `post ${same.id} is hidden; check my_posts for its status`);
     const details = [post.location || null, post.remote ? 1 : 0, post.contact || null, JSON.stringify(post.images), JSON.stringify(post.tags)];
     if (JSON.stringify(details) !== JSON.stringify([same.location, same.remote, same.contact, same.images, same.tags]))
       fail("invalid", `you posted this ${inWords(Date.now() - same.posted_at)} ago as ${same.id}; to change it, call update_post with that id`);
-    return { ...full(same, { contact: true }), duplicate: true, note: "This was posted a moment ago, so nothing new was created." };
+    return { ...publicationReceipt(full(same, { contact: true })), duplicate: true, note: "This was posted a moment ago, so nothing new was created." };
   }
 
   const limits = limitsFor(email);
@@ -521,7 +540,7 @@ function publish({ key, days = LIMITS.defaultDays, ...input }) {
     log(email, "post", id);
   });
   announce(`/posts/${id}`);
-  return full(one("select * from posts where id = ?", id), { contact: true });
+  return publicationReceipt(full(one("select * from posts where id = ?", id), { contact: true }));
 }
 
 function updatePost({ key, id, days, ...changes }) {
@@ -561,7 +580,12 @@ function updatePost({ key, id, days, ...changes }) {
 
 function read({ id, key }) {
   const post = livePost(id);
-  if (!key) return { warning: STRANGER_WARNING, post: full(post), note: "Sign in to see the contact, or reply with reply_to_post." };
+  const guidance = {
+    agent_guide: `${PUBLIC_URL}/agents`,
+    connection_guide: `${PUBLIC_URL}/connect`,
+    reply_requires_sign_in: true,
+  };
+  if (!key) return { warning: STRANGER_WARNING, post: full(post), ...guidance, note: "Reading is public. Sign in to reply with reply_to_post or see the contact. Read the agent_guide for instructions." };
 
   const email = whoIs(key);
   const seen = one("select 1 from activity where email = ? and kind = 'contact' and ref = ? and at > ?", email, post.id, Date.now() - DAY);
@@ -570,7 +594,7 @@ function read({ id, key }) {
       limited(`${LIMITS.contactsPerDay} contacts a day is the limit`, oldestFor(email, "contact", Date.now() - DAY) + DAY);
     log(email, "contact", post.id);
   }
-  return { warning: STRANGER_WARNING, post: full(post, { contact: true }) };
+  return { warning: STRANGER_WARNING, post: full(post, { contact: true }), ...guidance };
 }
 
 function mine({ key }) {
@@ -1434,8 +1458,8 @@ function countVisit(what, req) {
 }
 
 // --- pages ----------------------------------------------------------------------
-// site/*.md is the website. Plain text by default; browsers and search engines get
-// the same text as HTML, with headings, a canonical address and structured data.
+// site/*.md supplies the shared copy and agent guide. Browsers get server-rendered
+// entry pages; command-line clients can request plain text or structured post JSON.
 
 const SITE = new URL("./site/", import.meta.url);
 const PAGES = Object.fromEntries(
@@ -1445,28 +1469,53 @@ const PAGES = Object.fromEntries(
     .map((f) => [f.slice(0, -3), fs.readFileSync(new URL(f, SITE), "utf8")]),
 );
 const PAGE_INFO = {
-  index: { title: "jklist: a classifieds board you use through your AI agent", path: "/" },
-  agents: { title: "jklist for agents", path: "/agents", mono: true },
+  index: { title: "jklist — Craigslist for AI agents", path: "/", description: "Craigslist for AI agents. Tell your agent what you're looking for or what you want to sell." },
+  agents: { title: "jklist for agents", path: "/agents" },
+  connect: { title: "Connect your agent · jklist", path: "/connect" },
+  about: { title: "About · jklist", path: "/about", description: "Why I made jklist." },
+  faq: { title: "Frequently asked questions · jklist", path: "/faq" },
   rules: { title: "Rules · jklist", path: "/rules", description: "What's allowed on jklist, how to stay safe, and what is stored." },
 };
 const pagePath = (name) => PAGE_INFO[name]?.path ?? `/${name}`;
 
 const OG_IMAGE = fs.existsSync(new URL("og.png", SITE)) ? fs.readFileSync(new URL("og.png", SITE)) : null;
 const FAVICON =
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><rect width="48" height="48" fill="#111"/>' +
-  '<text x="24" y="31" font-family="Menlo, monospace" font-size="20" font-weight="700" fill="#fff" text-anchor="middle">jk</text></svg>';
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><style>rect{fill:#faf9f6}text{fill:#252521}@media(prefers-color-scheme:dark){rect{fill:#191a18}text{fill:#e2e2db}}</style><rect width="48" height="48"/>' +
+  '<text x="24" y="33" font-family="ui-monospace,monospace" font-size="32" text-anchor="middle">;)</text></svg>';
+const ICON_URL = `/favicon.svg?v=${crypto.createHash("sha256").update(FAVICON).digest("hex").slice(0, 12)}`;
 
 const escape = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const SITE_HOSTS = new Set(["jklist.com", "www.jklist.com", new URL(PUBLIC_URL).host]);
+const docHref = (value) => {
+  try {
+    const url = new URL(value);
+    return SITE_HOSTS.has(url.host) ? `${url.pathname}${url.search}${url.hash}` : value;
+  } catch { return value; }
+};
 // Escapes text and links the web addresses in it. Punctuation after an address stays outside the link.
-const linkify = (text, rel) =>
+const linkify = (text, rel, local = false) =>
   text
     .split(/(https?:\/\/[^\s<>"'`]*[^\s<>"'`.,;:!?)\]])/)
-    .map((part, i) => (i % 2 ? `<a href="${escape(part)}"${rel ? ` rel="${rel}"` : ""}>${escape(part)}</a>` : escape(part)))
+    .map((part, i) => {
+      if (!(i % 2)) return escape(part);
+      // Documentation keeps the public URL visible while navigation stays on this host.
+      const href = local ? docHref(part) : part;
+      return `<a href="${escape(href)}"${rel ? ` rel="${rel}"` : ""}>${escape(part)}</a>`;
+    })
     .join("");
 const inline = (text) =>
   text
     .split(/`([^`]+)`/)
-    .map((part, i) => (i % 2 ? `<code>${escape(part)}</code>` : linkify(part)))
+    .map((part, i) => {
+      if (i % 2) return `<code>${escape(part)}</code>`;
+      let output = "", from = 0;
+      for (const match of part.matchAll(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]*|#[^\s)]+)\)/g)) {
+        output += linkify(part.slice(from, match.index), undefined, true);
+        output += `<a href="${escape(docHref(match[2]))}">${escape(match[1])}</a>`;
+        from = match.index + match[0].length;
+      }
+      return output + linkify(part.slice(from), undefined, true);
+    })
     .join("");
 
 // A little markdown for people: headings, paragraphs, lists, quotes and indented
@@ -1474,6 +1523,8 @@ const inline = (text) =>
 function render(text, shift = 0) {
   const lines = text.split("\n");
   const out = [];
+  let section = false;
+  const ids = new Set();
   const starts = /^(#{1,3} |    |> ?|- |\d+\. )/;
   for (let i = 0; i < lines.length; ) {
     const line = lines[i];
@@ -1481,7 +1532,17 @@ function render(text, shift = 0) {
     if (!line.trim()) i++;
     else if (heading) {
       const level = heading[1].length + shift;
-      out.push(`<h${level}>${inline(heading[2])}</h${level}>`);
+      if (level <= 2 && section) { out.push("</section>"); section = false; }
+      if (level === 2) { out.push(heading[2] === "FAQ" ? '<section class="faq">' : "<section>"); section = true; }
+      let anchor = "";
+      if (level > 1) {
+        const base = heading[2].toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "section";
+        let id = base, n = 2;
+        while (ids.has(id)) id = `${base}-${n++}`;
+        ids.add(id);
+        anchor = ` id="${id}"`;
+      }
+      out.push(`<h${level}${anchor}>${inline(heading[2])}</h${level}>`);
       i++;
     } else if (line.startsWith("    ")) {
       const block = [];
@@ -1504,26 +1565,69 @@ function render(text, shift = 0) {
       out.push(`<p>${inline(paragraph.join(" "))}</p>`);
     }
   }
+  if (section) out.push("</section>");
   return out.join("\n");
 }
 
 // Structured data for search engines. "<" is escaped so the text can't end the script tag.
 const jsonLd = (data) => `<script type="application/ld+json">${JSON.stringify(data).replaceAll("<", "\\u003c")}</script>`;
 
-// Cloudflare turns email addresses in HTML into a script, which agents don't run.
-// It leaves alone anything between email_off comments.
-// People read the browser's sans-serif; agents and code get the system mono. `aside` is the agent
-// guide below the homepage, in a quieter color: there for agents, easy for people to skip.
-// `mono` sets a whole page that way. `body` is ready-made HTML in place of the rendered text.
-function html(text, { title, description, path, image, markdown, data, aside, body, mono, type = "website" } = {}) {
+// Every public page is a standalone document: no scripts, fonts or stylesheet requests.
+const DOCUMENT_CSS = `
+:root{color-scheme:light dark;--paper:#faf9f6;--ink:#252521;--muted:#62635d;--link:#224db3;--line:#d9d9d1;--code:#f1f0ec;--mono:ui-monospace,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main,header,footer{max-width:40rem;margin:auto;padding:0 1.25rem}
+header{padding-top:1.5rem}
+main{padding-top:2rem;padding-bottom:1rem}
+h1,h2,h3{line-height:1.3}
+h1{font-size:1.625rem;font-weight:600;letter-spacing:-.025em;margin:0 0 1.5rem;overflow-wrap:anywhere}
+.home h1{font-size:1.0625rem;font-weight:400;letter-spacing:0;line-height:1.6;margin-bottom:1rem}
+h2{font-size:1.125rem;font-weight:600;border-top:1px solid var(--line);padding-top:1.5rem;margin:2.5rem 0 1.25rem}
+h3{font-size:1rem;font-weight:600;margin:1.5rem 0 .4rem}
+p{margin:.5rem 0 1rem}
+a{color:var(--link);text-underline-offset:.18em;overflow-wrap:anywhere}
+a:focus-visible{outline:2px solid;outline-offset:4px}
+a[aria-current=page]{color:var(--ink);font-weight:600}
+blockquote{margin:.65rem 0;padding:.25rem 0 .25rem 1rem;border-left:2px solid var(--line)}
+pre,code{font:.8125rem/1.6 var(--mono);background:var(--code);border-radius:3px}
+code{padding:.1em .3em;overflow-wrap:anywhere}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);padding:.75rem;margin:1rem 0}
+pre code{padding:0;background:none}
+.faq,.faq-page{font-size:.9375rem}
+.faq h3,.faq-page h2{font-size:1rem;font-weight:700;margin:1.75rem 0 .4rem}
+.faq-page h2{border:0;padding:0}
+.faq p,.faq-page p{margin:.4rem 0 .9rem}
+.site-nav{display:flex;flex-wrap:wrap;gap:.5rem 1rem;font-size:.8125rem}
+.brand{font:600 1.0625rem/1.3 var(--mono);color:var(--ink);margin-right:auto;text-decoration:none}
+.wink{font-weight:400;color:var(--muted)}
+footer{padding-bottom:2rem;margin-top:1rem}
+footer nav{border-top:1px solid var(--line);padding-top:1rem}
+.meta,figcaption{font-size:.8125rem;color:var(--muted)}
+ul,ol{padding-left:1.4rem}
+li{margin:.4rem 0}
+.posts{list-style:none;padding:0;margin:1.75rem 0}
+.posts li{margin:0;border-top:1px solid var(--line);padding:1rem 0}
+.posts h2{font-size:1rem;border:0;padding:0;margin:0}
+.posts p{margin:.3rem 0 0}
+.facts{font-size:.875rem;margin:1.5rem 0}
+.facts div{display:grid;grid-template-columns:5.5rem minmax(0,1fr);gap:.5rem;margin:.35rem 0}
+.facts dt{color:var(--muted)}
+.facts dd{margin:0;overflow-wrap:anywhere}
+.post-body{overflow-wrap:anywhere}
+figure{margin:1.5rem 0}
+figure img{display:block;max-width:100%;height:auto;max-height:32rem}
+figcaption{margin-top:.4rem}
+@media(max-width:480px){main{padding-top:1.5rem}}
+@media(prefers-color-scheme:dark){:root{--paper:#191a18;--ink:#e2e2db;--muted:#b3b5ab;--link:#a6bdff;--line:#42443d;--code:#232420}}
+`;
+
+function html(text, { title, description, path, image, markdown, data, body, pageClass = "document", type = "website" } = {}) {
   title ??= text.split("\n")[0].replace(/^#\s*/, "");
   description ??= (text.split("\n\n")[1] || "").replace(/\s+/g, " ").trim();
   image ??= OG_IMAGE ? `${PUBLIC_URL}/og.png` : null;
   const url = path && `${PUBLIC_URL}${path}`;
-  const links = [
-    ...[["/", "home"], ["/rules", "rules"]].filter(([to]) => to !== path).map(([to, name]) => `<a href="${to}">${name}</a>`),
-    `<a href="${SOURCE_URL}">github</a>`,
-  ].join(" · ");
+  const links = (items) => items.map(([to, label]) => `<a href="${to}"${path === to ? ' aria-current="page"' : ""}>${label}</a>`).join("");
   const head = [
     `<title>${escape(title)}</title>`,
     `<meta name="description" content="${escape(description)}">`,
@@ -1539,130 +1643,100 @@ function html(text, { title, description, path, image, markdown, data, aside, bo
     markdown ? `<link rel="alternate" type="text/markdown" href="${PUBLIC_URL}/${markdown}.md">` : "",
     GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" content="${escape(GOOGLE_SITE_VERIFICATION)}">` : "",
     data ? jsonLd(data) : "",
-    ANALYTICS_HTML,
   ].filter(Boolean);
   return `<!doctype html>
 <html lang="en">
+<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="${ICON_URL}" type="image/svg+xml">
+<style>${DOCUMENT_CSS}</style>
 ${head.join("\n")}
-<style>
-body { max-width: 42rem; margin: 2rem auto; padding: 0 1rem; font-family: sans-serif; background: #fff; overflow-wrap: break-word }
-pre, code, .mono { font-family: ui-monospace, Menlo, Consolas, monospace }
-pre, .mono { font-size: 14px }
-pre { overflow-x: auto }
-img { max-width: 100%; height: auto }
-hr { margin: 4rem 0 2rem }
-aside { color: #767676 }
-</style>
+</head>
+<body>
 <!--email_off-->
-<main${mono ? ' class="mono"' : ""}>
+<header><nav class="site-nav" aria-label="Site"><a class="brand" href="/" aria-label="jklist home">jklist <span class="wink" aria-hidden="true">;)</span></a>${links([["/posts", "Posts"], ["/agents", "For agents"], ["/faq", "FAQ"]])}</nav></header>
+<main class="${pageClass}">
 ${body ?? render(text)}
 </main>
-<nav>${links}</nav>
-${aside ? `<hr>\n<aside class="mono">\n${render(aside, 1)}\n</aside>\n` : ""}<!--/email_off-->
-`;
+<footer><nav class="site-nav" aria-label="More about jklist">${links([["/posts", "Posts"], ["/faq", "FAQ"], ["/connect", "Setup"], ["/agents", "For agents"], ["/about", "About"], ["/rules", "Rules &amp; privacy"], [SOURCE_URL, "GitHub"]])}</nav></footer>
+<!--/email_off-->
+</body>
+</html>`;
 }
 
 const WEBSITE = {
-  "@context": "https://schema.org",
-  "@type": "WebSite",
-  name: "jklist",
-  url: `${PUBLIC_URL}/`,
-  description: "A classifieds board you use through your AI agent or chatbot.",
-  inLanguage: "en",
+  "@context": "https://schema.org", "@type": "WebSite", name: "jklist", url: `${PUBLIC_URL}/`,
+  description: "Craigslist for AI agents.", inLanguage: "en",
 };
 
-const HTML = Object.fromEntries(
-  Object.keys(PAGES).map((name) => [
-    name,
-    html(PAGES[name], { ...PAGE_INFO[name], path: pagePath(name), markdown: name, ...(name === "index" && { data: WEBSITE, aside: PAGES.agents }) }),
-  ]),
-);
-const NOT_FOUND_HTML = html("# not found\n\nThere's nothing at this address. jklist is at https://jklist.com\n", { title: "Not found · jklist" });
+const HTML = Object.fromEntries(Object.keys(PAGES).map((name) => [name,
+  html(PAGES[name], { ...PAGE_INFO[name], path: pagePath(name), markdown: name, pageClass: name === "faq" ? "faq-page" : "document" }),
+]));
+const NOT_FOUND_HTML = html("# Page not found\n\nThere's nothing at this address.\n", { title: "Not found · jklist", body: `<h1>Page not found</h1><p>There's nothing at this address.</p><p><a href="/">Start at jklist</a> or <a href="/posts">see current posts</a>.</p>` });
 
-// A post as a page, so it can be shared as a link. No contact on it.
-function postPage(row) {
-  const images = JSON.parse(row.images);
-  const place = row.remote ? (row.location ? `${row.location}, or remote` : "remote") : row.location;
-  const text = [
-    `# ${row.title}`,
-    "",
-    `${KINDS[row.kind]} · ${place} · posted ${iso(row.posted_at).slice(0, 10)}`,
-    "",
-    ...(images.length ? [...images, ""] : []),
-    ...(row.body ? [row.body, ""] : []),
-    "To reply, tell your agent:",
-    "",
-    `    Read jklist.com and reply to post ${row.id}.`,
-    "",
-  ].join("\n");
-  const summary = `${KINDS[row.kind]} · ${place}.${row.body ? ` ${row.body.replace(/\s+/g, " ").slice(0, 150)}` : ""}`;
-  // What people wrote is shown as plain paragraphs, so a post can't turn itself into headings or lists.
-  const paragraphs = (row.body ?? "").split(/\n\s*\n/).filter((p) => p.trim());
-  const body = [
-    `<h1>${escape(row.title)}</h1>`,
-    `<p>${escape(`${KINDS[row.kind]} · ${place} · posted ${iso(row.posted_at).slice(0, 10)}`)}</p>`,
-    // Photos uploaded here are shown from here. Photos on other sites stay links, so a
-    // poster can't learn who opened the page.
-    ...images.map((url) => {
-      const name = imageName(url);
-      return name ? `<p><img src="/images/${name}" alt="${escape(row.title)}"></p>` : `<p><a href="${escape(url)}" rel="ugc nofollow">${escape(url)}</a></p>`;
-    }),
-    ...paragraphs.map((p) => `<p>${linkify(p, "ugc nofollow").replaceAll("\n", "<br>")}</p>`),
-    "<p>To reply, tell your agent:</p>",
-    `<pre><code>Read jklist.com and reply to post ${escape(row.id)}.</code></pre>`,
-  ].join("\n");
-  return html(text, {
-    body,
-    title: `${row.title} · jklist`,
-    description: summary,
-    path: `/posts/${row.id}`,
-    image: images[0],
-    type: "article",
-    data: {
-      "@context": "https://schema.org",
-      // schema.org has a type for each side: Offer for what's offered, Demand for what's needed.
-      "@type": row.kind === "need" ? "Demand" : "Offer",
-      name: row.title,
-      description: row.body || undefined,
-      url: `${PUBLIC_URL}/posts/${row.id}`,
-      image: images.length ? images : undefined,
-      availableAtOrFrom: row.location ? { "@type": "Place", name: row.location } : undefined,
-      validFrom: iso(row.posted_at),
-      validThrough: iso(row.expires_at),
-    },
-  });
+const dateLabel = (value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+const timeTag = (value, precise = false) => `<time datetime="${escape(iso(new Date(value).getTime()))}">${dateLabel(value)}${precise ? ` · ${new Date(value).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" })} UTC` : ""}</time>`;
+const placeLabel = (post) => post.remote ? (post.location ? `${post.location} · also remote or shipping` : "Remote / ships") : post.location;
+
+function postRows(posts) {
+  return `<ul class="posts">${posts.map((post) => `<li><h2><a href="/posts/${escape(post.id)}">${escape(post.title)}</a></h2><p class="meta">${KINDS[post.kind]} · ${escape(placeLabel(post))} · ${timeTag(post.posted_at)}</p></li>`).join("\n")}</ul>`;
 }
 
-// Posts as a page of links, for agents that can only open links they've seen, and for
-// people. The plain list is indexed; searches and later pages aren't.
+function homePage() {
+  const text = PAGES.index.replace(/^# jklist\s+Craigslist for AI agents\./, "# Craigslist for AI agents.");
+  return html(text, { ...PAGE_INFO.index, path: "/", markdown: "index", data: WEBSITE, pageClass: "home" });
+}
+
+function unavailablePostPage() {
+  return html("", { title: "Post unavailable · jklist", description: "This jklist post is no longer available.", body: `<h1>This post is no longer available.</h1><p>It may have expired or been removed.</p><p><a href="/posts">See current posts</a>, or ask your agent to find something similar on jklist.</p>` });
+}
+
+function postPage(row) {
+  const images = JSON.parse(row.images);
+  const place = placeLabel(row);
+  const url = `${PUBLIC_URL}/posts/${row.id}`;
+  const prompt = `I'm interested in this post: ${url}. Help me reply. Show me your reply before sending it.`;
+  const summary = `${KINDS[row.kind]} · ${place}.${row.body ? ` ${row.body.replace(/\s+/g, " ").slice(0, 150)}` : ""}`;
+  const paragraphs = (row.body ?? "").split(/\n\s*\n/).filter((p) => p.trim());
+  const photos = images.map((image, i) => {
+    const name = imageName(image);
+    return name ? `<figure><a href="/images/${name}"><img src="/images/${name}" alt="${escape(row.title)} — photo ${i + 1}" loading="lazy" decoding="async"></a><figcaption><a href="/images/${name}">Photo ${i + 1} of ${images.length} · Full size</a></figcaption></figure>` : `<p><a href="${escape(image)}" rel="ugc nofollow">${escape(image)}</a></p>`;
+  }).join("\n");
+  const body = `<article>
+<h1>${escape(row.title)}</h1>
+<p class="meta">Open for replies</p>
+<dl class="facts"><div><dt>Type</dt><dd>${KINDS[row.kind]}</dd></div><div><dt>Where</dt><dd>${escape(place)}</dd></div><div><dt>Posted</dt><dd>${timeTag(row.posted_at)}</dd></div><div><dt>Expires</dt><dd>${timeTag(row.expires_at, true)}</dd></div></dl>
+<div class="post-body">${paragraphs.length ? paragraphs.map((p) => `<p>${linkify(p, "ugc nofollow").replaceAll("\n", "<br>")}</p>`).join("\n") : ""}</div>
+${images.length ? `<section aria-label="Photos"><h2>Photos</h2>${photos}</section>` : ""}
+</article>
+<section id="reply"><h2>Reply</h2><p>Give this to your agent:</p><blockquote>${linkify(prompt)}</blockquote>
+<p>To reply, ask your agent to sign you in. We’ll email you a code. <a href="/connect">Setup</a>.</p>
+<p class="meta">Replies go to your inbox. Your agent can check and answer them on jklist.</p></section>
+<p class="meta">Posted by another user. Check the details with them. <a href="/agents">Instructions for agents</a>.</p>`;
+  return html("", { body, pageClass: "post-page", title: `${row.title} · jklist`, description: summary, path: `/posts/${row.id}`, image: images[0], type: "article", data: {
+    "@context": "https://schema.org", "@type": row.kind === "need" ? "Demand" : "Offer", name: row.title, description: row.body || undefined, url,
+    image: images.length ? images : undefined, availableAtOrFrom: row.location ? { "@type": "Place", name: row.location } : undefined,
+    validFrom: iso(row.posted_at), validThrough: iso(row.expires_at),
+  } });
+}
+
 function listPage(args, { posts, next }) {
   const kept = Object.entries(args).filter(([name, value]) => value != null && !["key", "cursor"].includes(name));
-  const href = (changes) => {
+  const href = (cursor) => {
     const params = new URLSearchParams(kept.map(([name, value]) => [name, String(value)]));
-    for (const [name, value] of Object.entries(changes)) value == null ? params.delete(name) : params.set(name, value);
-    return params.size ? `/posts?${params}` : "/posts";
+    params.set("cursor", cursor);
+    return `/posts?${params}`;
   };
-  const place = (p) => (p.remote ? (p.location ? `${p.location}, or remote` : "remote") : p.location);
-  const heading = `${args.q ? `posts matching “${args.q}”` : "posts"}${args.location ? ` near ${args.location}` : ""}`;
-  const kinds = [["all", null], ["needs", "need"], ["offers", "offer"], ["trades", "trade"]].map(([name, kind]) => `<a href="${escape(href({ kind }))}">${name}</a>`);
-  const body = [
-    `<h1>${escape(heading)}</h1>`,
-    `<p>${kinds.join(" · ")}</p>`,
-    posts.length
-      ? `<ul>${posts.map((p) => `<li><a href="/posts/${escape(p.id)}">${escape(p.title)}</a> · ${escape(`${KINDS[p.kind]} · ${place(p)} · ${p.posted_at.slice(0, 10)}`)}</li>`).join("\n")}</ul>`
-      : "<p>No posts here right now. Posts come and go, so check back later.</p>",
-    next ? `<p><a href="${escape(href({ cursor: next }))}">next page</a></p>` : "",
-  ].join("\n");
+  const labels = { q: "Search", location: "Location", kind: "Type", remote: "Remote", since: "Since", limit: "Per page" };
+  const context = kept.map(([name, value]) => `<div><dt>${escape(labels[name] ?? name)}</dt><dd>${escape(value)}</dd></div>`).join("");
+  const body = `<h1>Posts</h1><p>Give a post’s link to your agent to reply.</p>
+${context ? `<dl class="facts">${context}</dl><p class="meta"><a href="/posts">Clear search</a></p>` : ""}
+${posts.length ? postRows(posts) : `<p>No posts found. Ask your agent to try another search or post what you’re looking for.</p>`}
+${next ? `<p><a href="${escape(href(next))}">Next page →</a></p>` : ""}
+<p class="meta">To search or post, <a href="/">start with your agent</a>.</p>`;
   const plain = !kept.length && args.cursor == null;
-  return html("", {
-    body,
-    title: plain ? "Posts · jklist" : `${heading[0].toUpperCase()}${heading.slice(1)} · jklist`,
-    description: "Live posts on jklist, newest first: what people need, offer and trade.",
-    path: plain ? "/posts" : undefined,
-  });
+  return html("", { body, pageClass: "posts-page", title: "Posts · jklist", description: "Posts on jklist. Give a post's link to your agent to reply.", path: plain ? "/posts" : undefined });
 }
 
 const LLMS = `# jklist
@@ -1673,8 +1747,11 @@ Agents use it over MCP at ${PUBLIC_URL}/mcp, or over plain HTTP. Agents that can
 
 ## Docs
 
+- [Connection guide](${PUBLIC_URL}/connect): what agents can do, how to connect, and how to sign in
+- [FAQ](${PUBLIC_URL}/faq): privacy, replies, approvals, and post lifetime
 - [Agent guide](${PUBLIC_URL}/agents.md): how to connect, sign in, post, search and reply
-- [About](${PUBLIC_URL}/index.md): what jklist is, for people
+- [Home](${PUBLIC_URL}/index.md): what jklist is and how to start
+- [About](${PUBLIC_URL}/about.md): why jklist exists
 - [Rules](${PUBLIC_URL}/rules.md): what's allowed, and what's stored
 
 ## API
@@ -1711,9 +1788,9 @@ function announce(path) {
 
 // What a person sees when they open an address that only takes POST.
 const POST_ONLY = {
-  mcp: "This is jklist's MCP endpoint. Agents connect to it with POST.\n\nTo add it to Claude Code:\n\n    claude mcp add --transport http jklist https://jklist.com/mcp\n\nEverything else: https://jklist.com\n",
-  images: "Photos are uploaded here with POST and a key. How: https://jklist.com\n",
-  api: "Tools are called here with POST, for example POST https://jklist.com/api/search_posts. How: https://jklist.com\n",
+  mcp: `# Connect to jklist\n\nMCP uses POST at ${PUBLIC_URL}/mcp.\n\nInstructions for agents: ${PUBLIC_URL}/agents\n\nSetup prompt: ${PUBLIC_URL}/connect\n`,
+  images: `# Upload photos\n\nSend the photo to POST ${PUBLIC_URL}/images with your key.\n\nInstructions: ${PUBLIC_URL}/agents\n`,
+  api: `# jklist API\n\nCall tools with POST, for example POST ${PUBLIC_URL}/api/search_posts.\n\nInstructions: ${PUBLIC_URL}/agents\n`,
 };
 
 const securityTxt = () =>
@@ -2098,7 +2175,12 @@ async function handle(req, res) {
     // An MCP client asking for an event stream gets 405, as the MCP spec asks.
     const streamProbe = /text\/event-stream/.test(req.headers.accept || "") && (route === "" || route === "mcp");
     if (streamProbe || (Object.hasOwn(POST_ONLY, route) && !(route === "images" && id))) {
+      res.setHeader("vary", "accept");
+      if (!streamProbe && route === "mcp" && wantsHtml(req)) return send(res, 200, HTML.connect, "text/html; charset=utf-8");
       res.setHeader("allow", "POST");
+      if (!streamProbe && wantsHtml(req)) {
+        return send(res, 405, html(POST_ONLY[route]), "text/html; charset=utf-8");
+      }
       return send(res, 405, POST_ONLY[route] ?? POST_ONLY.mcp, "text/plain; charset=utf-8");
     }
     if (route === "posts" && !id) {
@@ -2113,7 +2195,7 @@ async function handle(req, res) {
       if (!wantsHtml(req)) return send(res, 200, await callTool(tool("read_post"), { id }, key, req));
       countVisit("page:post", req);
       const post = one("select * from posts where id = ? and hidden = 0 and expires_at > ?", id, Date.now());
-      return post ? send(res, 200, postPage(post), "text/html; charset=utf-8") : send(res, 404, NOT_FOUND_HTML, "text/html; charset=utf-8");
+      return post ? send(res, 200, postPage(post), "text/html; charset=utf-8") : send(res, 404, unavailablePostPage(), "text/html; charset=utf-8");
     }
     if (route === "images" && /^[a-f0-9]{16}\.(jpg|png|webp)$/.test(id || "") && one("select 1 from images where name = ?", id)) {
       const { type } = IMAGE_TYPES.find((k) => id.endsWith(k.ext));
@@ -2130,7 +2212,7 @@ async function handle(req, res) {
     }
     if (INDEXNOW_KEY && route === `${INDEXNOW_KEY}.txt`) return send(res, 200, INDEXNOW_KEY, "text/plain; charset=utf-8");
     if (route === "favicon.svg" || route === "favicon.ico") {
-      res.writeHead(200, { ...HEADERS, "content-security-policy": "default-src 'none'", "content-type": "image/svg+xml", "cache-control": "public, max-age=604800" });
+      res.writeHead(200, { ...HEADERS, "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'", "content-type": "image/svg+xml", "cache-control": "public, max-age=604800" });
       return res.end(FAVICON);
     }
     if (route === "og.png" && OG_IMAGE) {
@@ -2143,7 +2225,7 @@ async function handle(req, res) {
     if (!id && Object.hasOwn(PAGES, page)) {
       countVisit(`page:${page}`, req);
       res.setHeader("vary", "accept");
-      if (wantsHtml(req) && !route.endsWith(".md")) return send(res, 200, HTML[page], "text/html; charset=utf-8");
+      if (wantsHtml(req) && !route.endsWith(".md")) return send(res, 200, page === "index" ? homePage() : HTML[page], "text/html; charset=utf-8");
       // The text version points search engines at the page's one real address.
       res.setHeader("link", `<${PUBLIC_URL}${pagePath(page)}>; rel="canonical"`);
       // Agents fetching the homepage get the whole guide in one go.

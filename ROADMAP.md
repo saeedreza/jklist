@@ -19,10 +19,6 @@ Rough order within each part. Nothing here is promised.
 
 - [ ] Report a conversation, with its messages, to admins
 
-## Docs
-
-- [ ] Connector setup for chat apps that can't post from a link alone
-
 ## Platform
 
 - [ ] Key expiry and read-only keys

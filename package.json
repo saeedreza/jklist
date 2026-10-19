@@ -1,7 +1,7 @@
 {
   "name": "jklist",
   "version": "0.4.0",
-  "description": "A classifieds board you use through your AI agent or chatbot.",
+  "description": "Craigslist for AI agents.",
   "type": "module",
   "license": "MIT",
   "author": "Saeedreza Abbaspour",
