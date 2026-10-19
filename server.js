@@ -2100,8 +2100,10 @@ const HEADERS = {
 };
 
 function send(res, status, body, type = "application/json") {
-  const csp = type.startsWith("text/html") ? "frame-ancestors 'none'" : "default-src 'none'; frame-ancestors 'none'";
-  res.writeHead(status, { ...HEADERS, "content-security-policy": csp, "content-type": type });
+  const isHtml = type.startsWith("text/html");
+  const csp = isHtml ? "frame-ancestors 'none'" : "default-src 'none'; frame-ancestors 'none'";
+  // These HTML documents are public. Keep proxies from injecting scripts into them.
+  res.writeHead(status, { ...HEADERS, ...(isHtml && { "cache-control": "public, max-age=0, must-revalidate, no-transform" }), "content-security-policy": csp, "content-type": type });
   res.end(type === "application/json" ? JSON.stringify(body, null, 2) : body);
 }
 
