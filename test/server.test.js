@@ -97,7 +97,7 @@ test("pages are plain text for agents and html for browsers", async () => {
   assert.ok(linkedPaths.includes("/connect"), "connection help is directly discoverable");
   assert.ok(linkedPaths.includes("/about"), "the explanation behind jklist is discoverable");
   assert.match(page, new RegExp(`<link rel="canonical" href="${board.base}/">`));
-  assert.match(page, /<meta property="og:image" content="[^"]+\/og\.png">/);
+  assert.match(page, /<meta property="og:image" content="[^"]+\/og\.png\?v=[a-f0-9]+">/);
   assert.match(page, /"@type":"WebSite"/);
   assert.match(page, /<!--email_off-->/);
   const rules = await fetch(`${board.base}/rules`, { headers: { accept: "text/html" } }).then((r) => r.text());
@@ -109,7 +109,7 @@ test("pages are plain text for agents and html for browsers", async () => {
   assert.match(aboutText.headers.get("content-type"), /^text\/plain/);
   assert.equal(aboutText.headers.get("link"), `<${board.base}/about>; rel="canonical"`);
   const llms = await fetch(`${board.base}/llms.txt`).then((r) => r.text());
-  assert.match(llms, /^# jklist\n\n> A classifieds board you use through your AI agent/);
+  assert.match(llms, /^# jklist\n\n> Craigslist for AI agents\./);
   assert.match(await fetch(`${board.base}/robots.txt`).then((r) => r.text()), /Disallow: \/api\//);
   const icon = await fetch(`${board.base}/favicon.ico`);
   assert.equal(icon.headers.get("content-type"), "image/svg+xml");
@@ -257,7 +257,7 @@ test("addresses that aren't pages still answer sensibly", async () => {
   for (const route of ["mcp", "agents", "connect"])
     assert.ok(guidance.includes(`${board.base}/${route}`), "protocol clients receive method and discovery endpoints");
   assert.equal((await fetch(`${board.base}/`, { headers: { accept: "text/event-stream" } })).status, 405, "an MCP stream probe gets 405");
-  for (const address of ["/images", "/api", "/api/search_posts"]) assert.equal((await fetch(board.base + address)).status, 405, address);
+  for (const address of ["/images", "/api", "/api/search_posts", "/inbound"]) assert.equal((await fetch(board.base + address)).status, 405, address);
 
   const missing = await fetch(`${board.base}/nope`, { headers: { accept: "text/html" } });
   assert.equal(missing.status, 404);
@@ -268,6 +268,34 @@ test("addresses that aren't pages still answer sensibly", async () => {
 
   assert.match(await fetch(`${board.base}/.well-known/security.txt`).then((r) => r.text()), /^Contact: mailto:hello@jklist\.com/);
   assert.equal(await fetch(`${board.base}/health`).then((r) => r.text()), "ok");
+});
+
+test("the sitemap lists canonical live pages without stale modification dates", async (t) => {
+  const key = await signIn("sitemap-edit@example.com");
+  const { id } = await post(key, { title: "Sitemap edit fixture", remote: true });
+  t.after(() => call("delete_post", { id }, key));
+  const db = board.db();
+  const created = Date.now() - 7 * 86_400_000;
+  db.prepare("update posts set posted_at = ? where id = ?").run(created, id);
+  db.close();
+  const edited = Date.now();
+  await call("update_post", { id, body: "Changed after publication" }, key);
+  const sitemap = await fetch(`${board.base}/sitemap.xml`).then(r => r.text());
+  const entries = [...sitemap.matchAll(/<url>([\s\S]*?)<\/url>/g)].map(match => match[1]);
+  const urls = entries.map(entry => entry.match(/<loc>([^<]+)<\/loc>/)[1]);
+  assert.equal(new Set(urls).size, urls.length, "each canonical URL appears once");
+  for (const path of ["/", "/agents", "/connect", "/about", "/faq", "/rules", "/posts"])
+    assert.ok(urls.includes(`${board.base}${path}`));
+  for (const url of urls) {
+    assert.equal(new URL(url).origin, board.base);
+    assert.doesNotMatch(new URL(url).pathname, /\.md$|^\/index$/);
+  }
+  for (const path of ["/posts", `/posts/${id}`]) {
+    const entry = entries.find(entry => entry.includes(`<loc>${board.base}${path}</loc>`));
+    assert.ok(entry);
+    const lastmod = entry.match(/<lastmod>([^<]+)<\/lastmod>/)?.[1];
+    if (lastmod) assert.ok(Date.parse(lastmod) >= edited, "creation time cannot stand in for the latest edit");
+  }
 });
 
 test("signing in trades a code from the inbox for a key", async () => {

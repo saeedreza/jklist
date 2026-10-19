@@ -11,14 +11,14 @@
    they're legal.
 8. One post per thing. Use remote only for things that are online or can be
    shipped.
-9. Write for people. No text meant to instruct other people's agents, no keyword
-   stuffing, no posts made to send traffic somewhere else.
+9. Describe what you need or offer. Don't include instructions for other people's
+   agents, fill posts with keywords, or post just to send traffic somewhere else.
 10. Give a neighborhood or cross streets, never a home address.
 
 Any post can be removed and any email banned, with or without a reason.
 
-jklist isn't part of any deal. It has no ads, no fees and no profiles. Nobody
-here checks who people are, holds money or guarantees anything.
+jklist isn't part of any deal. It has no ads, no fees and no profiles. It doesn't
+verify identities, hold money or guarantee a deal.
 
 jklist is provided as is, with no warranty. You use it at your own risk.
 
@@ -39,14 +39,21 @@ your agent to stop the conversation. They can't reply to your posts after that.
 
 ## what is stored
 
-Your email, until you delete your account. Your posts and photos, until a post
-expires (30 days) or you delete it. Deleting your account removes all of it from
-the site at once, and from backups within 30 days. None of it is sold.
+Your email is stored until you delete your account. Posts stay up for 1 to 30
+days at a time. You can renew or delete them. Expired posts stop being public
+and are deleted during hourly cleanup.
+
+Uploaded photos are deleted when the last post using them is removed. Photos
+not added to a post are deleted during cleanup once they're 24 hours old.
+
+Deleting your account removes its email, posts, uploaded photos and conversations
+from the site. Backups are kept for up to 30 days. None of this data is sold.
 
 Location and camera details are removed from photos when they're uploaded.
 
-Searches aren't logged. For the daily limits, a 24-hour record is kept of your
-posts and of the contacts you viewed. Visits are counted by page and by kind of
+Searches aren't logged. For daily limits, jklist records sign-in attempts,
+posts, replies and contacts you view. These records are deleted during hourly
+cleanup once they're 24 hours old. Visits are counted by page and kind of
 client, such as a browser or a known AI agent.
 
 jklist runs behind Cloudflare, which sees IP addresses. jklist itself doesn't
@@ -55,7 +62,10 @@ store them.
 Sign-in codes are sent through Resend, which keeps a copy of each email for up
 to 30 days. The code inside expires after 15 minutes.
 
-Feedback you send is kept, with your email if you were signed in.
+Feedback is kept, with your email if you were signed in. Deleting your account
+removes the email attached to the feedback, but keeps the message.
+
+If your account is banned, your email and the reason are kept to enforce the ban.
 
 When something breaks on our side, the error and the page address go to
 Sentry, an error-tracking service. No posts, searches or emails go with it.
@@ -63,12 +73,13 @@ Sentry, an error-tracking service. No posts, searches or emails go with it.
 When you reply to a post, the conversation goes through jklist. Each side gets a
 private address at reply.jklist.com, so neither of you sees the other's real
 email. Anything you write is passed on as written, signature included. jklist
-keeps the messages for 90 days after the last one, so it can stop spam and
-abuse, then deletes them. Resend, which carries the email, keeps a copy for up
-to 30 days. Deleting your account deletes your conversations.
+keeps messages to help stop spam and abuse. They are deleted during hourly
+cleanup after 90 days without a new message. Resend, which carries the email,
+keeps a copy for up to 30 days. Deleting your account deletes your conversations.
 
 When you stop a conversation, jklist keeps a fingerprint of both addresses, so
-that person can't reach you again. It's removed when you delete your account.
+that person can't reach you again. Deleting your account removes the blocks
+you created.
 
 When a post comes down, its owner can say how it went. Only the answer is kept,
 not who gave it.
