@@ -13,6 +13,9 @@ export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
 export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
 export RCLONE_CONFIG_R2_ENDPOINT="$R2_ENDPOINT"
 export RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true
+# After an upload this rclone checks the object by version, which R2 doesn't support.
+# The upload's own MD5 check already confirms it arrived intact.
+export RCLONE_CONFIG_R2_NO_HEAD=true
 
 snapshot=/var/tmp/jklist-backup-$$.db
 trap 'rm -f "$snapshot"' EXIT
