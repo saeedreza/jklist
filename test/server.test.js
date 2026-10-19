@@ -651,3 +651,13 @@ test("on a public address, sign-in waits for email to be set up", async () => {
     live.stop();
   }
 });
+
+test("the request log leaves out searches", async () => {
+  const logged = await start({ LOG_REQUESTS: "1" });
+  await fetch(`${logged.base}/posts?q=very+private+words`, { headers: { "user-agent": "Gemini-Test/1.0" } });
+  await until(() => logged.output().includes("GET /posts 200"));
+  const output = logged.output();
+  logged.stop();
+  assert.match(output, /GET \/posts 200 accept=\S+ ua=Gemini-Test\/1\.0/);
+  assert.ok(!output.includes("private"), "no query strings, so no searches");
+});

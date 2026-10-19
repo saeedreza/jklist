@@ -40,6 +40,7 @@ export async function start(settings = {}) {
       RESEND_API_KEY: "",
       ORIGIN_SECRET: "",
       READ_ONLY: "",
+      LOG_REQUESTS: "",
       BACKUP_STAMP: "",
       RELAY_DOMAIN: "",
       RESEND_WEBHOOK_SECRET: "",

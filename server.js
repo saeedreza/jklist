@@ -22,6 +22,9 @@ const ANALYTICS_HTML = env.ANALYTICS_HTML || "";
 const ADMINS = (env.ADMIN_EMAILS || "").toLowerCase().split(",").map((e) => e.trim()).filter(Boolean);
 const ORIGIN_SECRET = env.ORIGIN_SECRET;
 const READ_ONLY = env.READ_ONLY === "1";
+// One line per request, for checking how agents fetch the site. No addresses and no
+// query strings, so no searches.
+const LOG_REQUESTS = env.LOG_REQUESTS === "1";
 const SENTRY = env.SENTRY_DSN ? new URL(env.SENTRY_DSN) : null;
 const BACKUP_STAMP = env.BACKUP_STAMP;
 const GOOGLE_SITE_VERIFICATION = env.GOOGLE_SITE_VERIFICATION;
@@ -1411,7 +1414,9 @@ const CLIENTS = [
   ["claude", /claude|anthropic/i],
   ["openai", /openai|chatgpt|gptbot/i],
   ["perplexity", /perplexity/i],
-  ["google", /googlebot|google-extended/i],
+  ["meta", /meta-external|facebookexternalhit/i],
+  ["xai", /xai|grok/i],
+  ["google", /google/i],
   ["bing", /bingbot/i],
   ["script", /curl|wget|python|node|undici|axios|go-http|okhttp|deno|bun/i],
   ["browser", /mozilla/i],
@@ -2146,6 +2151,12 @@ function health() {
 }
 
 const server = http.createServer(async (req, res) => {
+  if (LOG_REQUESTS)
+    res.on("finish", () =>
+      console.log(
+        `${req.method} ${req.url.split("?")[0]} ${res.statusCode} accept=${req.headers.accept ?? "-"} ua=${String(req.headers["user-agent"] ?? "-").slice(0, 160)}`,
+      ),
+    );
   if (req.url === "/health") {
     const status = health();
     res.writeHead(status === "ok" ? 200 : 503);
