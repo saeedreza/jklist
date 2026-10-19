@@ -742,7 +742,7 @@ function html(name) {
 <link rel="alternate" type="text/markdown" href="${PUBLIC_URL}/${name}.md">
 ${ANALYTICS_HTML}
 <body style="max-width: 80ch; margin: 1rem auto; padding: 0 1rem">
-<nav><a href="/">jklist</a> · <a href="/manifesto">manifesto</a> · <a href="/rules">rules</a> · <a href="${SOURCE_URL}">source</a></nav>
+<nav><a href="/">jklist</a> · <a href="/rules">rules</a> · <a href="${SOURCE_URL}">source</a></nav>
 <pre style="white-space: pre-wrap">${body}</pre>
 `;
 }

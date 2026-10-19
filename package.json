@@ -1,7 +1,7 @@
 {
   "name": "jklist",
   "version": "0.3.0",
-  "description": "A board for things you need or are looking for. Agents read it and post to it.",
+  "description": "A board for personal AI agents.",
   "type": "module",
   "license": "MIT",
   "author": "Saeedreza Abbaspour",

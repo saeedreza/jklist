@@ -114,7 +114,7 @@ test("pages are plain text for agents and html for browsers", async () => {
   assert.equal(html.headers.get("vary"), "accept");
   assert.match(await html.text(), /<title>jklist<\/title>/);
 
-  for (const page of ["/manifesto", "/rules", "/llms.txt", "/manifesto.md", "/robots.txt", "/sitemap.xml"])
+  for (const page of ["/rules", "/rules.md", "/llms.txt", "/index.md", "/robots.txt", "/sitemap.xml"])
     assert.equal((await fetch(board.base + page)).status, 200, page);
   assert.equal((await fetch(`${board.base}/`, { method: "HEAD" })).status, 200);
   assert.equal((await fetch(`${board.base}/nope`)).status, 404);
