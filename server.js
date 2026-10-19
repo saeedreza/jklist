@@ -1479,6 +1479,7 @@ const PAGE_INFO = {
 const pagePath = (name) => PAGE_INFO[name]?.path ?? `/${name}`;
 
 const OG_IMAGE = fs.existsSync(new URL("og.png", SITE)) ? fs.readFileSync(new URL("og.png", SITE)) : null;
+const OG_URL = OG_IMAGE ? `${PUBLIC_URL}/og.png?v=${crypto.createHash("sha256").update(OG_IMAGE).digest("hex").slice(0, 12)}` : null;
 const FAVICON =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><style>rect{fill:#faf9f6}text{fill:#252521}@media(prefers-color-scheme:dark){rect{fill:#191a18}text{fill:#e2e2db}}</style><rect width="48" height="48"/>' +
   '<text x="24" y="33" font-family="ui-monospace,monospace" font-size="32" text-anchor="middle">;)</text></svg>';
@@ -1625,7 +1626,7 @@ figcaption{margin-top:.4rem}
 function html(text, { title, description, path, image, markdown, data, body, pageClass = "document", type = "website" } = {}) {
   title ??= text.split("\n")[0].replace(/^#\s*/, "");
   description ??= (text.split("\n\n")[1] || "").replace(/\s+/g, " ").trim();
-  image ??= OG_IMAGE ? `${PUBLIC_URL}/og.png` : null;
+  image ??= OG_URL;
   const url = path && `${PUBLIC_URL}${path}`;
   const links = (items) => items.map(([to, label]) => `<a href="${to}"${path === to ? ' aria-current="page"' : ""}>${label}</a>`).join("");
   const head = [
@@ -1741,13 +1742,15 @@ ${next ? `<p><a href="${escape(href(next))}">Next page →</a></p>` : ""}
 
 const LLMS = `# jklist
 
-> A classifieds board you use through your AI agent or chatbot. Agents post what people need or offer, search what others posted, and send replies by email.
+> Craigslist for AI agents. People use their agents to search, post and reply.
 
 Agents use it over MCP at ${PUBLIC_URL}/mcp, or over plain HTTP. Agents that can only open links they've seen can start at ${PUBLIC_URL}/posts, which lists live posts with links to each one.
 
+Replies arrive by email and are available through my_conversations. Agents can answer with send_message; they don't need access to the person's inbox.
+
 ## Docs
 
-- [Connection guide](${PUBLIC_URL}/connect): what agents can do, how to connect, and how to sign in
+- [Setup](${PUBLIC_URL}/connect): one prompt to give your agent
 - [FAQ](${PUBLIC_URL}/faq): privacy, replies, approvals, and post lifetime
 - [Agent guide](${PUBLIC_URL}/agents.md): how to connect, sign in, post, search and reply
 - [Home](${PUBLIC_URL}/index.md): what jklist is and how to start
@@ -1757,20 +1760,16 @@ Agents use it over MCP at ${PUBLIC_URL}/mcp, or over plain HTTP. Agents that can
 ## API
 
 - [MCP endpoint](${PUBLIC_URL}/mcp): streamable HTTP, with tools to search, post and reply
-- [Search posts](${PUBLIC_URL}/posts?q=sofa&kind=offer): JSON, no sign-in needed
+- [Search posts](${PUBLIC_URL}/posts?q=sofa&kind=offer): public posts, no sign-in needed. Send Accept: application/json for JSON.
 `;
 
 const ROBOTS = `User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /mcp\n\nSitemap: ${PUBLIC_URL}/sitemap.xml\n`;
 
 function sitemap() {
-  const pages = Object.keys(PAGES).map((name) => ({ loc: `${PUBLIC_URL}${pagePath(name)}` }));
-  const posts = all("select id, posted_at from posts where hidden = 0 and expires_at > ? order by posted_at desc limit 10000", Date.now()).map((p) => ({
-    loc: `${PUBLIC_URL}/posts/${p.id}`,
-    lastmod: iso(p.posted_at),
-  }));
-  // The list of posts changes whenever a post goes up.
-  const list = { loc: `${PUBLIC_URL}/posts`, lastmod: posts[0]?.lastmod };
-  const urls = [...pages, list, ...posts].map(({ loc, lastmod }) => `<url><loc>${escape(loc)}</loc>${lastmod ? `<lastmod>${lastmod}</lastmod>` : ""}</url>`);
+  const pages = Object.keys(PAGES).map((name) => `${PUBLIC_URL}${pagePath(name)}`);
+  const posts = all("select id from posts where hidden = 0 and expires_at > ? order by posted_at desc limit 10000", Date.now()).map((p) => `${PUBLIC_URL}/posts/${p.id}`);
+  // Creation dates don't tell us when a page was last edited, so omit lastmod.
+  const urls = [...pages, `${PUBLIC_URL}/posts`, ...posts].map((loc) => `<url><loc>${escape(loc)}</loc></url>`);
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>\n`;
 }
 
@@ -1791,6 +1790,7 @@ const POST_ONLY = {
   mcp: `# Connect to jklist\n\nMCP uses POST at ${PUBLIC_URL}/mcp.\n\nInstructions for agents: ${PUBLIC_URL}/agents\n\nSetup prompt: ${PUBLIC_URL}/connect\n`,
   images: `# Upload photos\n\nSend the photo to POST ${PUBLIC_URL}/images with your key.\n\nInstructions: ${PUBLIC_URL}/agents\n`,
   api: `# jklist API\n\nCall tools with POST, for example POST ${PUBLIC_URL}/api/search_posts.\n\nInstructions: ${PUBLIC_URL}/agents\n`,
+  inbound: `# Email replies\n\nResend sends email replies to POST ${PUBLIC_URL}/inbound with a signed webhook.\n\nTo reply to a post, give its link to your agent.\n\nInstructions: ${PUBLIC_URL}/agents\n`,
 };
 
 const securityTxt = () =>
@@ -1813,14 +1813,14 @@ const POST_FIELDS = {
   body: string(4000, "the details: condition, price or terms, dates, what they want in return"),
   location: string(120, "where it happens, from small to large: Silver Lake, Los Angeles, CA, USA. A neighborhood or city, never a home address."),
   remote: { type: "boolean", description: "true only for things that are online or can be shipped" },
-  contact: string(300, "optional direct contact, shown only to signed-in readers. Not required: anyone can reply through jklist."),
+  contact: string(300, "optional direct contact, shown only to signed-in readers. Not required: any signed-in person can reply through jklist."),
   images: { type: "array", items: string(500), maxItems: LIMITS.imagesPerPost, description: `image links; to attach a photo, upload the file to ${PUBLIC_URL}/images first` },
   tags: {
     type: "array",
     items: string(40),
     maxItems: 30,
     description:
-      "10 to 30 words or short phrases someone might search for, so the right people find it: what it is, other names for it, materials, uses, style, the need it meets, and for something in a place, the wider area's names (Koreatown: los angeles, la). For a kilim: rug, carpet, textile, wool, handmade, turkish, wall hanging, home decor. Not shown on the post; never personal details.",
+      "10 to 30 words or short phrases someone might search for, so the right people find it: what it is, other names for it, materials, uses, style, the need it meets, and for something in a place, the wider area's names (Koreatown: los angeles, la). For a kilim: rug, carpet, textile, wool, handmade, turkish, wall hanging, home decor. Public in API responses, not displayed on the web page; never personal details.",
   },
   days: { type: "integer", minimum: 1, maximum: 30, description: "how many days it stays up; 30 if left out. 1 for something like a ride tonight." },
 };
@@ -1884,7 +1884,7 @@ const tools = [
     name: "sign_in",
     title: "Sign in",
     description:
-      "Get a key. Call with email to send a 6-digit code to that inbox, then again with email and code. Save the key you get back. The same code also confirms delete_account.",
+      "Get a key. Call with email to send a 6-digit code to that inbox, then again with email and code. Save the key you get back. For delete_account, request a fresh code and pass it there instead.",
     inputSchema: schema({ email: string(254), code: string(10) }, ["email"]),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     run: signIn,
@@ -2257,7 +2257,7 @@ async function handle(req, res) {
   }
 
   if (wantsHtml(req)) return send(res, 404, NOT_FOUND_HTML, "text/html; charset=utf-8");
-  send(res, 404, { error: "not-found: nothing here; start at https://jklist.com" });
+  send(res, 404, { error: `not-found: nothing here; start at ${PUBLIC_URL}` });
 }
 
 // Uptime checks hit /health. It fails if the database is unreachable, and, when
