@@ -112,7 +112,9 @@ test("pages are plain text for agents and html for browsers", async () => {
   const html = await fetch(`${board.base}/`, { headers: { accept: "text/html" } });
   assert.match(html.headers.get("content-type"), /^text\/html/);
   assert.equal(html.headers.get("vary"), "accept");
-  assert.match(await html.text(), /<title>jklist<\/title>/);
+  const page = await html.text();
+  assert.match(page, /<title>jklist<\/title>/);
+  assert.match(page, /<!--email_off-->/);
 
   for (const page of ["/rules", "/rules.md", "/llms.txt", "/index.md", "/robots.txt", "/sitemap.xml"])
     assert.equal((await fetch(board.base + page)).status, 200, page);

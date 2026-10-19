@@ -726,6 +726,8 @@ const PAGES = Object.fromEntries(
     .map((f) => [f.slice(0, -3), fs.readFileSync(new URL(f, SITE), "utf8")]),
 );
 
+// Cloudflare turns email addresses in HTML into a script, which agents don't run.
+// It leaves alone anything between email_off comments.
 const escape = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
 function html(name) {
@@ -743,7 +745,7 @@ function html(name) {
 ${ANALYTICS_HTML}
 <body style="max-width: 80ch; margin: 1rem auto; padding: 0 1rem">
 <nav><a href="/">jklist</a> · <a href="/rules">rules</a> · <a href="${SOURCE_URL}">source</a></nav>
-<pre style="white-space: pre-wrap">${body}</pre>
+<pre style="white-space: pre-wrap"><!--email_off-->${body}<!--/email_off--></pre>
 `;
 }
 
