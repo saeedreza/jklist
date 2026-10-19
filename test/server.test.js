@@ -2,6 +2,7 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -51,21 +52,50 @@ function age(email, days) {
 
 const post = async (key, fields) => (await call("publish_post", { kind: "offer", location: "Los Angeles, CA, USA", ...fields }, key)).body;
 const titles = (result) => result.body.posts.map((p) => p.title);
+const htmlHrefs = (page) => [...page.matchAll(/<a\b[^>]*\bhref="([^"]+)"/g)].map((match) => match[1].replaceAll("&amp;", "&"));
+const htmlLinks = (page) => htmlHrefs(page).map((href) => new URL(href, board.base));
+const pageHeader = (page) => page.match(/<header\b[^>]*>([\s\S]*?)<\/header>/)?.[1];
+
+function assertPlainDocument(page) {
+  const header = pageHeader(page);
+  assert.ok(header, "each page exposes the shared site header");
+  assert.match(header, /<nav\b(?=[^>]*\bclass="[^"]*\bsite-nav\b[^"]*")(?=[^>]*\baria-label="Site")[^>]*>/, "site navigation has an accessible name");
+  const brand = header.match(/<a\b(?=[^>]*\bclass="[^"]*\bbrand\b[^"]*")(?=[^>]*\bhref="\/")(?=[^>]*\baria-label="jklist home")[^>]*>([\s\S]*?)<\/a>/)?.[1];
+  assert.ok(brand, "the brand links home with a meaningful accessible name");
+  assert.match(brand, /jklist/);
+  assert.match(brand, /<span\b(?=[^>]*\bclass="[^"]*\bwink\b[^"]*")(?=[^>]*\baria-hidden="true")[^>]*>;\)<\/span>/, "the wink is decorative");
+  assert.equal([...page.matchAll(/<main\b/gi)].length, 1, "each page has one main document");
+  for (const script of page.matchAll(/<script\b([^>]*)>/gi)) {
+    assert.match(script[1], /\btype=["']application\/ld\+json["']/i, "only structured data is allowed in a script element");
+    assert.doesNotMatch(script[1], /\bsrc\s*=/i, "pages need no executable JavaScript download");
+  }
+  assert.doesNotMatch(page, /<link\b(?=[^>]*\brel=["']stylesheet["'])[^>]*>/i, "pages need no stylesheet download");
+  assert.doesNotMatch(page, /<link\b[^>]*\bas=["']font["']/i, "pages do not download fonts");
+  assert.doesNotMatch(page, /<(?:form|input|textarea|button|select)\b|\brole=["'](?:tab|tablist)["']/i, "pages hand off to agents without application controls");
+  const inlineCss = [...page.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((match) => match[1]).join("\n");
+  assert.ok(inlineCss.length > 0, "the document includes its own small stylesheet");
+  assert.doesNotMatch(inlineCss, /@import|@font-face|url\s*\(/i, "the stylesheet does not load other assets");
+  assert.ok(Buffer.byteLength(inlineCss) < 6000, "inline CSS stays below 6,000 bytes");
+}
 
 test("pages are plain text for agents and html for browsers", async () => {
   const text = await fetch(`${board.base}/`);
   assert.match(text.headers.get("content-type"), /^text\/plain/);
   const homeText = await text.text();
-  assert.match(homeText, /^# jklist\n\nA classifieds board/);
+  assert.match(homeText, /^# jklist\n\nCraigslist for AI agents\./);
   assert.match(homeText, /# jklist for agents/, "agents get the whole guide from the homepage");
 
   const html = await fetch(`${board.base}/`, { headers: { accept: "text/html" } });
   assert.match(html.headers.get("content-type"), /^text\/html/);
   assert.equal(html.headers.get("vary"), "accept");
   const page = await html.text();
-  assert.match(page, /<title>jklist: a classifieds board you use through your AI agent<\/title>/);
-  assert.match(page, /<aside class="mono">\n<h2>jklist for agents<\/h2>/, "the agent guide sits below, quieter");
-  assert.match(page, /<h1>jklist<\/h1>/);
+  assert.match(page, /<title>jklist — Craigslist for AI agents<\/title>/);
+  const heading = page.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/)?.[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  assert.equal(heading, "Craigslist for AI agents.");
+  const linkedPaths = htmlLinks(page).map((link) => link.pathname);
+  assert.ok(linkedPaths.includes("/agents"), "agents can discover their instructions from the human page");
+  assert.ok(linkedPaths.includes("/connect"), "connection help is directly discoverable");
+  assert.ok(linkedPaths.includes("/about"), "the explanation behind jklist is discoverable");
   assert.match(page, new RegExp(`<link rel="canonical" href="${board.base}/">`));
   assert.match(page, /<meta property="og:image" content="[^"]+\/og\.png">/);
   assert.match(page, /"@type":"WebSite"/);
@@ -75,24 +105,157 @@ test("pages are plain text for agents and html for browsers", async () => {
 
   const textVersion = await fetch(`${board.base}/rules.md`);
   assert.equal(textVersion.headers.get("link"), `<${board.base}/rules>; rel="canonical"`);
+  const aboutText = await fetch(`${board.base}/about.md`);
+  assert.match(aboutText.headers.get("content-type"), /^text\/plain/);
+  assert.equal(aboutText.headers.get("link"), `<${board.base}/about>; rel="canonical"`);
   const llms = await fetch(`${board.base}/llms.txt`).then((r) => r.text());
   assert.match(llms, /^# jklist\n\n> A classifieds board you use through your AI agent/);
   assert.match(await fetch(`${board.base}/robots.txt`).then((r) => r.text()), /Disallow: \/api\//);
   const icon = await fetch(`${board.base}/favicon.ico`);
   assert.equal(icon.headers.get("content-type"), "image/svg+xml");
+  const iconSource = await icon.text();
+  assert.match(iconSource, /<svg\b/);
+  assert.match(iconSource, /<text\b[^>]*>;\)<\/text>/, "the favicon uses the same wink as the site brand");
+  assert.equal(await fetch(`${board.base}/favicon.svg`).then((r) => r.text()), iconSource, "both favicon URLs return the same SVG");
   assert.equal((await fetch(`${board.base}/og.png`)).headers.get("content-type"), "image/png");
 
-  for (const address of ["/agents", "/agents.md", "/rules", "/rules.md", "/llms.txt", "/index.md", "/robots.txt", "/sitemap.xml"])
+  for (const address of ["/agents", "/agents.md", "/connect", "/connect.md", "/about", "/about.md", "/rules", "/rules.md", "/llms.txt", "/index.md", "/robots.txt", "/sitemap.xml"])
     assert.equal((await fetch(board.base + address)).status, 200, address);
+  const sitemap = await fetch(`${board.base}/sitemap.xml`).then((r) => r.text());
+  assert.ok(sitemap.includes(`<loc>${board.base}/about</loc>`), "the canonical about page is discoverable in the sitemap");
+  assert.ok(!sitemap.includes(`<loc>${board.base}/about.md</loc>`), "the text alias is not a duplicate sitemap entry");
   assert.equal((await fetch(`${board.base}/`, { method: "HEAD" })).status, 200);
   assert.equal((await fetch(`${board.base}/nope`)).status, 404);
+});
+
+test("the homepage is a lightweight document with public instructions and examples", async () => {
+  const page = await fetch(`${board.base}/`, { headers: { accept: "text/html" } }).then((r) => r.text());
+  assert.match(page, /<h2\b[^>]*>FAQ<\/h2>/, "the questions are part of the document");
+  assert.match(page, /<blockquote>Sell my couch on jklist\.com\.<\/blockquote>/);
+  assert.match(page, /<blockquote>Find me a 1994 Toyota Camry on jklist\.com\.<\/blockquote>/);
+  assertPlainDocument(page);
+  assert.ok(Buffer.byteLength(page) < 16 * 1024, "the complete homepage stays below 16 KiB");
+});
+
+test("public documents share the same standalone, script-free presentation", async () => {
+  const home = await fetch(`${board.base}/`, { headers: { accept: "text/html" } }).then((r) => r.text());
+  const withoutCurrentPage = (header) => header.replace(/\saria-current="page"/g, "");
+  for (const address of ["/agents", "/connect", "/about", "/faq", "/rules", "/posts", "/mcp", "/nope", "/posts/no-such-post"]) {
+    const response = await fetch(`${board.base}${address}`, { headers: { accept: "text/html" } });
+    assert.match(response.headers.get("content-type"), /^text\/html/);
+    const page = await response.text();
+    assertPlainDocument(page);
+    assert.equal(withoutCurrentPage(pageHeader(page)), withoutCurrentPage(pageHeader(home)), "the same navigation is available on every public page");
+  }
+});
+
+test("the MCP URL shows setup in browsers and protocol guidance to plain clients", async () => {
+  const browser = await fetch(`${board.base}/mcp`, { headers: { accept: "text/html" } });
+  assert.equal(browser.status, 200);
+  assert.equal(browser.headers.get("vary"), "accept");
+  assert.match(browser.headers.get("content-type"), /^text\/html/);
+  const page = await browser.text();
+  assertPlainDocument(page);
+  assert.ok(page.includes(`<link rel="canonical" href="${board.base}/connect">`), "the MCP browser view is the setup document");
+  const setup = await fetch(`${board.base}/connect`, { headers: { accept: "text/html" } }).then((r) => r.text());
+  assert.equal(page, setup, "the browser MCP URL reuses the setup document and its shared presentation");
+
+  for (const accept of ["text/plain", "application/json", "text/event-stream"]) {
+    const response = await fetch(`${board.base}/mcp`, { headers: { accept } });
+    assert.equal(response.status, 405);
+    assert.equal(response.headers.get("allow"), "POST");
+    assert.equal(response.headers.get("vary"), "accept");
+    assert.match(response.headers.get("content-type"), /^text\/plain/);
+    const guidance = await response.text();
+    assert.match(guidance, /https?:\/\/[^\s]+\/connect\b/, "plain clients receive setup guidance");
+    assert.match(guidance, /\bPOST\b/, "plain clients can discover the supported request method");
+    assert.ok(guidance.includes(`${board.base}/mcp`), "the actual MCP endpoint is discoverable");
+    assert.ok(guidance.includes(`${board.base}/agents`), "the agent instructions are discoverable");
+    assert.doesNotMatch(guidance, /<!doctype|<html/i);
+  }
+});
+
+test("documentation links stay on the current site without changing URLs shown to agents", async () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jklist-document-links-"));
+  let child;
+  try {
+    fs.copyFileSync(path.join(root, "server.js"), path.join(dir, "server.mjs"));
+    for (const folder of ["data", "site"]) fs.cpSync(path.join(root, folder), path.join(dir, folder), { recursive: true });
+    fs.writeFileSync(path.join(dir, "site", "link-fixture.md"), [
+      "# Link fixture", "",
+      "https://jklist.com/agents?from=fixture&mode=read#start", "",
+      "https://www.jklist.com/connect?from=fixture#http", "",
+      "https://preview.example.test/faq?from=fixture#questions", "",
+      "https://external.example.test/reference?from=fixture&mode=read#part", "",
+      "https://jklist.com.evil.example.test/agents", "",
+      "https://external.example.test/?next=https://jklist.com/agents", "",
+      "[Connection steps](https://jklist.com/connect?from=labeled&mode=read#sign-in)", "",
+      "[Jump to sign in](#sign-in)", "",
+      "[Rules](/rules#photos)", "",
+      "[<img src=x onerror=alert>](https://external.example.test/safe-label)", "",
+      "[Unsafe](javascript:alert(1))", "",
+      "    curl https://jklist.com/mcp", "",
+      "`https://jklist.com/api/sign_in`", "",
+      "## Sign in", "", "First destination.", "",
+      "### Sign in", "", "A repeated heading.", "",
+      "## Sign in", "", "Another repeated heading.", "",
+    ].join("\n"));
+    const probe = http.createServer();
+    await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    const { port } = probe.address();
+    await new Promise((resolve) => probe.close(resolve));
+    const base = `http://127.0.0.1:${port}`;
+    child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "server.mjs"], {
+      cwd: dir,
+      env: {
+        ...process.env, PORT: String(port), HOST: "127.0.0.1", PUBLIC_URL: "https://preview.example.test",
+        DB_FILE: path.join(dir, "jklist.db"), UPLOADS_DIR: path.join(dir, "uploads"), BACKUP_DIR: path.join(dir, "backups"),
+        RESEND_API_KEY: "", RESEND_WEBHOOK_SECRET: "", ORIGIN_SECRET: "", SENTRY_DSN: "", INDEXNOW_KEY: "", BACKUP_STAMP: "",
+      },
+    });
+    child.stdout.resume();
+    child.stderr.resume();
+    let startupError;
+    child.on("error", (error) => (startupError = error));
+    await until(() => startupError ? Promise.reject(startupError) : fetch(`${base}/health`).then(() => true, () => false));
+    const page = await fetch(`${base}/link-fixture`, { headers: { accept: "text/html" } }).then((r) => r.text());
+    const hrefs = htmlHrefs(page);
+    for (const href of ["/agents?from=fixture&mode=read#start", "/connect?from=fixture#http", "/faq?from=fixture#questions"])
+      assert.ok(hrefs.includes(href), "same-site navigation preserves query parameters and fragments on the current host");
+    for (const href of ["https://external.example.test/reference?from=fixture&mode=read#part", "https://jklist.com.evil.example.test/agents", "https://external.example.test/?next=https://jklist.com/agents"])
+      assert.ok(hrefs.includes(href), "external and merely similar URLs are never rewritten");
+    assert.ok(page.includes(">https://jklist.com/agents?from=fixture&amp;mode=read#start</a>"), "the public URL remains visible for copying to an agent");
+    assert.ok(page.includes("<code>curl https://jklist.com/mcp</code>"), "command examples keep their absolute endpoint");
+    assert.ok(page.includes("<code>https://jklist.com/api/sign_in</code>"), "inline endpoint examples stay absolute");
+    assert.ok(hrefs.includes("/connect?from=labeled&mode=read#sign-in"), "labeled Markdown links use the same local navigation rules");
+    assert.ok(hrefs.includes("/rules#photos"), "root-relative links remain intact");
+    assert.ok(hrefs.includes("#sign-in"), "jump links preserve their fragment");
+    const headingIds = [...page.matchAll(/<h[23]\b[^>]*\bid="([^"]+)"/g)].map((match) => match[1]);
+    assert.ok(headingIds.includes("sign-in"), "jump links have a real heading destination");
+    assert.equal(headingIds.length, 3);
+    assert.equal(new Set(headingIds).size, headingIds.length, "repeated headings have unique destinations");
+    assert.ok(page.includes('&lt;img src=x onerror=alert&gt;</a>'), "link labels stay escaped text");
+    assert.doesNotMatch(page, /<img\b|href=["']javascript:/i, "Markdown cannot create executable labels or script links");
+    const plain = await fetch(`${base}/link-fixture.md`).then((r) => r.text());
+    assert.ok(plain.includes("https://www.jklist.com/connect?from=fixture#http"), "plain documentation is not rewritten");
+  } finally {
+    if (child?.pid && child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise((resolve) => child.once("exit", resolve));
+      child.kill();
+      await exited;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("addresses that aren't pages still answer sensibly", async () => {
   const mcpPage = await fetch(`${board.base}/mcp`);
   assert.equal(mcpPage.status, 405);
   assert.equal(mcpPage.headers.get("allow"), "POST");
-  assert.match(await mcpPage.text(), /claude mcp add/);
+  const guidance = await mcpPage.text();
+  for (const route of ["mcp", "agents", "connect"])
+    assert.ok(guidance.includes(`${board.base}/${route}`), "protocol clients receive method and discovery endpoints");
   assert.equal((await fetch(`${board.base}/`, { headers: { accept: "text/event-stream" } })).status, 405, "an MCP stream probe gets 405");
   for (const address of ["/images", "/api", "/api/search_posts"]) assert.equal((await fetch(board.base + address)).status, 405, address);
 
@@ -238,33 +401,94 @@ test("expired posts disappear at once, not at the next cleanup", async () => {
   assert.equal((await call("my_posts", {}, key)).body.posts.find((p) => p.id === id).expired, true);
 });
 
+test("unavailable share links explain their state without exposing old post content", async () => {
+  const key = await signIn("unavailable-pages@example.com");
+  const fixtures = [];
+  for (const state of ["expired", "hidden", "deleted"]) {
+    const fields = {
+      title: `Private ${state} fixture listing`,
+      body: `Old ${state} fixture description must not leak`,
+      contact: `${state}-private-contact@example.com`,
+      images: [`https://example.com/${state}-private-image.jpg`],
+    };
+    const published = await post(key, fields);
+    fixtures.push({ ...fields, id: published.id });
+    if (state === "deleted") {
+      await call("delete_post", { id: published.id }, key);
+    } else {
+      const db = board.db();
+      if (state === "expired") db.prepare("update posts set expires_at = ? where id = ?").run(Date.now() - 1, published.id);
+      else db.prepare("update posts set hidden = 1 where id = ?").run(published.id);
+      db.close();
+    }
+  }
+  const sitemap = await fetch(`${board.base}/sitemap.xml`).then((r) => r.text());
+  for (const fixture of [...fixtures, { id: "missing-fixture-post" }]) {
+    const url = `${board.base}/posts/${fixture.id}`;
+    const html = await fetch(url, { headers: { accept: "text/html" } });
+    assert.equal(html.status, 404);
+    const page = await html.text();
+    assertPlainDocument(page);
+    assert.match(page, /This post is no longer available\./);
+    assert.match(page, /<meta name="robots" content="noindex">/);
+    assert.match(page, /<a\b[^>]*href="\/posts"[^>]*>/, "a person can discover current posts");
+    assert.doesNotMatch(page, /Open for replies|reply_to_post/, "unavailable posts have no reply handoff");
+    assert.ok(!page.includes(`/posts/${fixture.id}`), "alternative-search prompts do not target the unavailable post");
+    for (const privateValue of [fixture.title, fixture.body, fixture.contact, ...(fixture.images ?? [])].filter(Boolean))
+      assert.ok(!page.includes(privateValue), "the old listing is absent from the page and sharing metadata");
+    const json = await fetch(url, { headers: { accept: "application/json" } });
+    assert.equal(json.status, 404);
+    const missing = await json.json();
+    assert.match(missing.error, /^not-found:/);
+    assert.ok(!("post" in missing));
+    assert.ok(!sitemap.includes(`/posts/${fixture.id}</loc>`));
+  }
+  assert.deepEqual(titles(await call("search_posts", { q: "fixture listing" })), []);
+});
+
 test("the contact needs a key, and a post has a page you can share", async () => {
   const key = await signIn("poster@example.com");
-  const { id } = await post(key, {
+  const published = await post(key, {
     kind: "need",
     title: "Drummer wanted",
-    body: "Bring sticks.\n\n# Not a heading <b>loud</b>\nDemo: https://example.com/demo.",
+    body: "Bring sticks.\n\n# Not a heading <b>loud</b>\nDemo: https://example.com/demo.\n\nOther post: https://jklist.com/posts/another-post?ref=shared#details",
     contact: "call 555-0100",
     images: ["https://example.com/drums.jpg"],
   });
+  const { id } = published;
   const reader = await signIn("reader@example.com");
 
   const anonymous = await fetch(`${board.base}/posts/${id}`).then((r) => r.json());
   assert.ok(!("contact" in anonymous.post));
+  assert.equal(anonymous.agent_guide, `${board.base}/agents`);
+  assert.equal(anonymous.connection_guide, `${board.base}/connect`);
+  assert.equal(anonymous.reply_requires_sign_in, true);
+  assert.match(anonymous.note, /sign in.*reply/i);
   const signedIn = await fetch(`${board.base}/posts/${id}`, { headers: { authorization: `Bearer ${reader}` } }).then((r) => r.json());
   assert.equal(signedIn.post.contact, "call 555-0100");
 
   const page = await fetch(`${board.base}/posts/${id}`, { headers: { accept: "text/html" } }).then((r) => r.text());
+  assertPlainDocument(page);
   assert.match(page, /<title>Drummer wanted · jklist<\/title>/);
   assert.match(page, /"@type":"Demand"/);
   assert.match(page, new RegExp(`<link rel="canonical" href="${board.base}/posts/${id}">`));
   assert.ok((await fetch(`${board.base}/sitemap.xml`).then((r) => r.text())).includes(`<loc>${board.base}/posts/${id}</loc>`), "live posts are in the sitemap");
-  assert.match(page, new RegExp(`reply to post ${id}`));
+  const prompt = [...page.matchAll(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/g)].map((match) => match[1]).find((text) => text.includes(published.url));
+  assert.ok(prompt?.includes(published.url), "the selectable prompt uses the complete canonical post URL");
+  assert.match(prompt, /approv|before (?:you )?send|before sending/i, "opening the post does not authorize sending a reply");
+  assert.ok(!prompt.includes(key), "the prompt never shares the owner's key");
+  assert.match(page, /<a\b[^>]*href="\/agents"[^>]*>/);
+  assert.match(page, /<a\b[^>]*href="\/connect"[^>]*>/);
+  assert.match(page, /<dl\b[^>]*>/, "post facts remain a semantic description list");
+  const dates = [...page.matchAll(/<time\b[^>]*datetime="([^"]+)"[^>]*>/g)].map((m) => m[1]);
+  assert.ok(dates.includes(published.posted_at), "the visible posting date agrees with the API");
+  assert.ok(dates.includes(published.expires_at), "the visible closing date agrees with the API");
   assert.ok(
     page.includes('<p># Not a heading &lt;b&gt;loud&lt;/b&gt;<br>Demo: <a href="https://example.com/demo" rel="ugc nofollow">https://example.com/demo</a>.</p>'),
     "what people write stays text, and its links are marked as theirs",
   );
   assert.ok(page.includes('<a href="https://example.com/drums.jpg" rel="ugc nofollow">'), "a photo on another site stays a link");
+  assert.ok(htmlHrefs(page).includes("https://jklist.com/posts/another-post?ref=shared#details"), "URLs in user posts are preserved rather than rewritten as documentation navigation");
   assert.ok(!page.includes("<img"), "and is never loaded by the page");
   assert.ok(!page.includes("555-0100"), "the page never shows the contact");
 });
@@ -293,15 +517,68 @@ test("limits grow with an account's age, and admins aren't limited", async () =>
 
 test("publishing the same post twice returns the first one", async () => {
   const key = await signIn("retry@example.com");
-  const first = await post(key, { title: "Bike for sale", body: "Blue" });
-  const again = await post(key, { title: "Bike for sale", body: "Blue" });
+  const fields = { title: "Bike for sale", body: "Blue", contact: "private-retry-contact@example.com" };
+  const first = await post(key, fields);
+  assert.equal(first.receipt.status, "published");
+  assert.equal(first.receipt.url, first.url);
+  assert.equal(first.receipt.expires_at, first.expires_at);
+  assert.match(first.receipt.replies, /email.*agent.s conversations/i);
+  assert.ok(first.receipt.share_text.includes(first.url), "the receipt gives the human a complete link to share");
+  assert.ok(Array.isArray(first.receipt.next_steps) && first.receipt.next_steps.length > 0);
+  assert.ok(!JSON.stringify(first.receipt).includes(key), "the sharing receipt never contains a key");
+  assert.ok(!JSON.stringify(first.receipt).includes(fields.contact), "private contact is omitted from the sharing receipt");
+  const again = await post(key, fields);
   assert.equal(again.id, first.id);
   assert.equal(again.duplicate, true);
+  assert.deepEqual(again.receipt, first.receipt, "a retry returns the same usable publication receipt");
   assert.equal((await call("my_posts", {}, key)).body.posts.length, 1);
 
   const moved = await call("publish_post", { kind: "offer", title: "Bike for sale", body: "Blue", location: "Pasadena, CA" }, key);
   assert.equal(moved.status, 400, "the same post with other details is a correction");
   assert.match(moved.body.error, new RegExp(`as ${first.id}; to change it, call update_post`));
+});
+
+test("retrying a hidden post is blocked without a receipt or a replacement post", async () => {
+  const key = await signIn("hidden-retry@example.com");
+  const fields = { kind: "offer", title: "Hidden retry fixture", remote: true };
+  const { body: published } = await call("publish_post", fields, key);
+  const db = board.db();
+  db.prepare("update posts set hidden = 1 where id = ?").run(published.id);
+  db.close();
+
+  const retry = await call("publish_post", fields, key);
+  assert.equal(retry.status, 403);
+  assert.match(retry.body.error, /^blocked:/);
+  assert.ok(!("receipt" in retry.body), "an unavailable duplicate is not reported as published");
+  const viaMcp = await mcp({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "publish_post", arguments: fields } }, key);
+  assert.equal(viaMcp.body.result.isError, true);
+  assert.match(viaMcp.body.result.structuredContent.error, /^blocked:/);
+  assert.ok(!("receipt" in viaMcp.body.result.structuredContent));
+
+  const own = (await call("my_posts", {}, key)).body.posts;
+  assert.equal(own.length, 1, "a retry does not create another post");
+  assert.equal(own[0].id, published.id);
+  assert.equal(own[0].hidden, true, "retrying does not reverse moderation");
+  assert.equal((await fetch(published.url, { headers: { accept: "text/html" } })).status, 404);
+  assert.deepEqual(titles(await call("search_posts", { q: fields.title })), []);
+});
+
+test("MCP publishing returns the same complete receipt as the HTTP API", async () => {
+  const key = await signIn("receipt-mcp@example.com");
+  const fields = { kind: "offer", title: "MCP receipt fixture", body: "$125 or trade for a lamp", remote: true };
+  const published = await mcp({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "publish_post", arguments: fields } }, key);
+  assert.equal(published.status, 200);
+  assert.equal(published.body.result.isError, undefined);
+  const result = published.body.result.structuredContent;
+  assert.deepEqual(JSON.parse(published.body.result.content[0].text), result);
+  assert.equal(result.receipt.status, "published");
+  assert.equal(result.receipt.url, `${board.base}/posts/${result.id}`);
+  assert.equal(result.receipt.expires_at, result.expires_at);
+  assert.equal(result.body, fields.body, "unstructured terms remain the author's own words");
+  assert.ok(!("price" in result), "the interface does not invent a typed price");
+  const retry = await call("publish_post", fields, key);
+  assert.equal(retry.body.duplicate, true);
+  assert.deepEqual(retry.body.receipt, result.receipt);
 });
 
 test("replies reach the poster by email, from a private address", async () => {
@@ -479,11 +756,27 @@ test("uploads lose their metadata, belong to their owner, and go when no post us
     assert.match(stolen.body.error, /isn't one of your uploads/, disguised);
   }
 
-  const first = await post(key, { title: "Lamp", images: [jpg, png] });
+  const first = await post(key, { title: 'Lamp " onerror="alert(1) <rare>', images: [jpg, png] });
   const second = await post(key, { title: "Lamp, again", images: [jpg] });
   const page = await fetch(`${board.base}/posts/${first.id}`, { headers: { accept: "text/html" } }).then((r) => r.text());
+  assertPlainDocument(page);
   assert.ok(page.includes(`<meta property="og:image" content="${jpg}">`), "the shared page previews the first photo");
-  assert.ok(page.includes(`<img src="/images/${jpg.split("/images/")[1]}" alt="Lamp">`), "and shows the photos uploaded here");
+  const figures = [...page.matchAll(/<figure\b[^>]*>([\s\S]*?)<\/figure>/g)].map((match) => match[1]);
+  assert.equal(figures.length, 2, "each uploaded photo is independently accessible");
+  for (const [index, image] of [jpg, png].entries()) {
+    const figure = figures[index];
+    const imagePath = new URL(image).pathname;
+    assert.ok(htmlLinks(figure).some((link) => link.pathname === imagePath), "the original photo has a direct link");
+    const imageTag = figure.match(/<img\b[^>]*>/)?.[0];
+    assert.ok(imageTag, "uploaded photos appear in ordinary image elements");
+    assert.ok(imageTag.includes(`src="${imagePath}"`) || imageTag.includes(`src="${image}"`), "the image uses the real uploaded photo URL");
+    assert.match(imageTag, /\bloading="lazy"/);
+    assert.match(imageTag, /\bdecoding="async"/);
+    assert.match(imageTag, /\balt="[^"]*Lamp &quot; onerror=&quot;alert\(1\) &lt;rare&gt;[^"]*"/, "photo alternative text escapes the author's title");
+    assert.doesNotMatch(imageTag, /\son(?:error|load)=["']/i, "the title cannot create executable image attributes");
+    const caption = figure.match(/<figcaption\b[^>]*>([\s\S]*?)<\/figcaption>/)?.[1].replace(/<[^>]*>/g, "").trim();
+    assert.ok(caption, "a photo has a readable caption");
+  }
 
   await call("update_post", { id: first.id, images: [jpg] }, key);
   assert.equal((await fetch(png)).status, 404, "a photo taken off a post is deleted");
@@ -674,16 +967,22 @@ test("posts are a page of links, for agents that can only open links they've see
   const key = await signIn("lister@example.com");
   const { id } = await post(key, { title: "Aluminum ladder", body: "Six feet", location: "Silver Lake, Los Angeles, CA" });
   const page = await fetch(`${board.base}/posts`, { headers: { accept: "text/html" } }).then((r) => r.text());
-  assert.ok(page.includes(`<a href="/posts/${id}">Aluminum ladder</a> · Offer · Silver Lake, Los Angeles, CA ·`));
-  assert.match(page, /<a href="\/posts\?kind=need">needs<\/a>/);
-  assert.match(page, /<a href="\/posts\?cursor=[^"]+">next page<\/a>/);
+  assertPlainDocument(page);
+  assert.ok(page.includes(`href="/posts/${id}"`), "each listing has a crawlable link");
+  assert.match(page, /Aluminum ladder/);
+  assert.match(page, /Silver Lake, Los Angeles, CA/);
+  assert.match(page, /<a\b[^>]*href="\/posts\?cursor=[^"]+"[^>]*>/);
   assert.match(page, new RegExp(`<link rel="canonical" href="${board.base}/posts">`));
   assert.ok((await fetch(`${board.base}/sitemap.xml`).then((r) => r.text())).includes(`<loc>${board.base}/posts</loc>`), "the list is in the sitemap");
 
-  const search = await fetch(`${board.base}/posts?q=ladder&kind=offer`, { headers: { accept: "text/html" } }).then((r) => r.text());
-  assert.match(search, /<h1>posts matching “ladder”<\/h1>/);
-  assert.match(search, /<a href="\/posts\?q=ladder">all<\/a>/, "links keep the search");
+  const search = await fetch(`${board.base}/posts?q=ladder&kind=offer&location=Los+Angeles`, { headers: { accept: "text/html" } }).then((r) => r.text());
+  assertPlainDocument(search);
+  const searchContent = search.match(/<main\b[^>]*>([\s\S]*?)<\/main>/)?.[1];
+  assert.match(searchContent, /ladder/i, "the document identifies its active query");
+  assert.match(searchContent, /Los Angeles/i, "the document identifies its active location");
+  assert.match(searchContent, /offer/i, "the document identifies its active side of the board");
+  assert.ok(htmlLinks(searchContent).some((link) => link.pathname === "/posts" && link.search === ""), "a plain link clears the search");
   assert.match(search, /<meta name="robots" content="noindex">/);
   assert.ok((await fetch(`${board.base}/posts?q=ladder`).then((r) => r.json())).posts.some((p) => p.id === id), "scripts still get JSON");
-  assert.match(await fetch(`${board.base}/agents.md`).then((r) => r.text()), /start at\nhttps:\/\/jklist\.com\/posts\./);
+  assert.match(await fetch(`${board.base}/agents.md`).then((r) => r.text()), /start at\s+https:\/\/jklist\.com\/posts\./);
 });
