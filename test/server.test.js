@@ -122,6 +122,24 @@ test("pages are plain text for agents and html for browsers", async () => {
   assert.equal((await fetch(`${board.base}/nope`)).status, 404);
 });
 
+test("addresses that aren't pages still answer sensibly", async () => {
+  const mcpPage = await fetch(`${board.base}/mcp`);
+  assert.equal(mcpPage.status, 405);
+  assert.equal(mcpPage.headers.get("allow"), "POST");
+  assert.match(await mcpPage.text(), /claude mcp add/);
+  assert.equal((await fetch(`${board.base}/`, { headers: { accept: "text/event-stream" } })).status, 405, "an MCP stream probe gets 405");
+  for (const address of ["/images", "/api", "/api/search_posts"]) assert.equal((await fetch(board.base + address)).status, 405, address);
+
+  const missing = await fetch(`${board.base}/nope`, { headers: { accept: "text/html" } });
+  assert.equal(missing.status, 404);
+  assert.match(await missing.text(), /<title>not found<\/title>/);
+  assert.match((await fetch(`${board.base}/nope`).then((r) => r.json())).error, /^not-found/);
+
+  assert.equal((await fetch(`${board.base}/favicon.ico`)).status, 204);
+  assert.match(await fetch(`${board.base}/.well-known/security.txt`).then((r) => r.text()), /^Contact: mailto:hello@jklist\.com/);
+  assert.equal(await fetch(`${board.base}/health`).then((r) => r.text()), "ok");
+});
+
 test("signing in trades a code from the inbox for a key", async () => {
   const code = await requestCode("Sign@Example.com");
   const wrong = String((Number(code) + 1) % 1_000_000).padStart(6, "0");

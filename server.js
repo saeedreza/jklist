@@ -730,8 +730,7 @@ const PAGES = Object.fromEntries(
 // It leaves alone anything between email_off comments.
 const escape = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
-function html(name) {
-  const text = PAGES[name];
+function html(text, markdown) {
   const title = text.split("\n")[0].replace(/^#\s*/, "");
   const description = (text.split("\n\n")[1] || "").replace(/\s+/g, " ");
   const body = escape(text).replace(/https?:\/\/[^\s<]*[^\s<.,)]/g, (url) => `<a href="${url}">${url}</a>`);
@@ -741,7 +740,8 @@ function html(name) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escape(title)}</title>
 <meta name="description" content="${escape(description)}">
-<link rel="alternate" type="text/markdown" href="${PUBLIC_URL}/${name}.md">
+<link rel="icon" href="data:,">
+${markdown ? `<link rel="alternate" type="text/markdown" href="${PUBLIC_URL}/${markdown}.md">` : ""}
 ${ANALYTICS_HTML}
 <body style="max-width: 80ch; margin: 1rem auto; padding: 0 1rem">
 <nav><a href="/">jklist</a> · <a href="/rules">rules</a> · <a href="${SOURCE_URL}">source</a></nav>
@@ -749,7 +749,18 @@ ${ANALYTICS_HTML}
 `;
 }
 
-const HTML = Object.fromEntries(Object.keys(PAGES).map((name) => [name, html(name)]));
+const HTML = Object.fromEntries(Object.keys(PAGES).map((name) => [name, html(PAGES[name], name)]));
+const NOT_FOUND_HTML = html("# not found\n\nThere's nothing at this address. jklist is at https://jklist.com\n");
+
+// What a person sees when they open an address that only takes POST.
+const POST_ONLY = {
+  mcp: "This is jklist's MCP endpoint. Agents connect to it with POST.\n\nTo add it to Claude Code:\n\n    claude mcp add --transport http jklist https://jklist.com/mcp\n\nEverything else: https://jklist.com\n",
+  images: "Photos are uploaded here with POST and a key. How: https://jklist.com\n",
+  api: "Tools are called here with POST, for example POST https://jklist.com/api/search_posts. How: https://jklist.com\n",
+};
+
+const securityTxt = () =>
+  `Contact: mailto:hello@jklist.com\nExpires: ${iso(Date.now() + 180 * DAY)}\nPolicy: ${SOURCE_URL}/security/policy\nPreferred-Languages: en\n`;
 
 const ROBOTS = `User-agent: *\nAllow: /\n\nSitemap: ${PUBLIC_URL}/sitemap.xml\n`;
 const SITEMAP = `<?xml version="1.0" encoding="UTF-8"?>
@@ -1008,6 +1019,12 @@ async function handle(req, res) {
   }
 
   if (req.method === "GET" || req.method === "HEAD") {
+    // An MCP client asking for an event stream gets 405, as the MCP spec asks.
+    const streamProbe = /text\/event-stream/.test(req.headers.accept || "") && (route === "" || route === "mcp");
+    if (streamProbe || (Object.hasOwn(POST_ONLY, route) && !(route === "images" && id))) {
+      res.setHeader("allow", "POST");
+      return send(res, 405, POST_ONLY[route] ?? POST_ONLY.mcp, "text/plain; charset=utf-8");
+    }
     if (route === "posts" && !id) return send(res, 200, await callTool(tool("search_posts"), Object.fromEntries(url.searchParams), key, req));
     if (route === "posts") return send(res, 200, await callTool(tool("read_post"), { id }, key, req));
     if (route === "images" && /^[a-f0-9]{16}\.(jpg|png|gif|webp)$/.test(id || "") && one("select 1 from images where name = ?", id)) {
@@ -1016,6 +1033,11 @@ async function handle(req, res) {
       return fs.createReadStream(`${UPLOADS}/${id}`).pipe(res);
     }
     if (route === "robots.txt") return send(res, 200, ROBOTS, "text/plain; charset=utf-8");
+    if (route === ".well-known" && id === "security.txt") return send(res, 200, securityTxt(), "text/plain; charset=utf-8");
+    if (route === "favicon.ico") {
+      res.writeHead(204, HEADERS);
+      return res.end();
+    }
     if (route === "sitemap.xml") return send(res, 200, SITEMAP, "application/xml");
     const page = route === "" || route === "llms.txt" ? "index" : route.replace(/\.md$/, "");
     if (!id && Object.hasOwn(PAGES, page)) {
@@ -1035,11 +1057,20 @@ async function handle(req, res) {
     return send(res, 200, await callTool(called, args, key, req));
   }
 
-  send(res, 404, { error: "not-found: nothing here; start at /" });
+  if (/text\/html/.test(req.headers.accept || "")) return send(res, 404, NOT_FOUND_HTML, "text/html; charset=utf-8");
+  send(res, 404, { error: "not-found: nothing here; start at https://jklist.com" });
 }
 
 const server = http.createServer(async (req, res) => {
-  if (req.url === "/health") return res.end("ok");
+  if (req.url === "/health") {
+    try {
+      one("select 1");
+      return res.end("ok");
+    } catch {
+      res.writeHead(503);
+      return res.end("database unavailable");
+    }
+  }
   if (ORIGIN_SECRET && !fromCloudflare(req)) {
     res.writeHead(403);
     return res.end();
