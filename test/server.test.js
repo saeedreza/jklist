@@ -661,3 +661,28 @@ test("the request log leaves out searches", async () => {
   assert.match(output, /GET \/posts 200 accept=\S+ ua=Gemini-Test\/1\.0/);
   assert.ok(!output.includes("private"), "no query strings, so no searches");
 });
+
+test("fetchers that don't say what they want get HTML, and command-line tools get text", async () => {
+  const type = async (headers) => (await fetch(`${board.base}/`, { headers })).headers.get("content-type");
+  assert.match(await type({ "user-agent": "Google", accept: "*/*" }), /^text\/html/, "Gemini's fetcher fails on plain text");
+  assert.match(await type({ "user-agent": "curl/8.7.1", accept: "*/*" }), /^text\/plain/);
+  assert.match(await type({ accept: "text/markdown, text/html;q=0.9" }), /^text\/plain/, "markdown first means markdown");
+  assert.match(await type({ accept: "text/html,application/xhtml+xml,*/*;q=0.8" }), /^text\/html/);
+});
+
+test("posts are a page of links, for agents that can only open links they've seen", async () => {
+  const key = await signIn("lister@example.com");
+  const { id } = await post(key, { title: "Aluminum ladder", body: "Six feet", location: "Silver Lake, Los Angeles, CA" });
+  const page = await fetch(`${board.base}/posts`, { headers: { accept: "text/html" } }).then((r) => r.text());
+  assert.ok(page.includes(`<a href="/posts/${id}">Aluminum ladder</a> · Offer · Silver Lake, Los Angeles, CA ·`));
+  assert.match(page, /<a href="\/posts\?kind=need">needs<\/a>/);
+  assert.match(page, /<a href="\/posts\?cursor=[^"]+">next page<\/a>/);
+  assert.match(page, new RegExp(`<link rel="canonical" href="${board.base}/posts">`));
+
+  const search = await fetch(`${board.base}/posts?q=ladder&kind=offer`, { headers: { accept: "text/html" } }).then((r) => r.text());
+  assert.match(search, /<h1>posts matching “ladder”<\/h1>/);
+  assert.match(search, /<a href="\/posts\?q=ladder">all<\/a>/, "links keep the search");
+  assert.match(search, /<meta name="robots" content="noindex">/);
+  assert.ok((await fetch(`${board.base}/posts?q=ladder`).then((r) => r.json())).posts.some((p) => p.id === id), "scripts still get JSON");
+  assert.match(await fetch(`${board.base}/agents.md`).then((r) => r.text()), /start at\nhttps:\/\/jklist\.com\/posts\./);
+});

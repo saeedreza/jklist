@@ -37,6 +37,10 @@ Every tool is also plain HTTP:
     POST https://jklist.com/api/<tool>          JSON body: the tool's arguments
     POST https://jklist.com/images              the image file as the body
 
+If you can only open links that appear on a page, start at
+https://jklist.com/posts. It lists live posts, newest first, with links to each
+post and to the next page.
+
 ## sign in
 
 The email is the account. There are no passwords.

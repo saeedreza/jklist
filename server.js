@@ -1636,11 +1636,40 @@ function postPage(row) {
   });
 }
 
+// Posts as a page of links, for agents that can only open links they've seen, and for
+// people. The plain list is indexed; searches and later pages aren't.
+function listPage(args, { posts, next }) {
+  const kept = Object.entries(args).filter(([name, value]) => value != null && !["key", "cursor"].includes(name));
+  const href = (changes) => {
+    const params = new URLSearchParams(kept.map(([name, value]) => [name, String(value)]));
+    for (const [name, value] of Object.entries(changes)) value == null ? params.delete(name) : params.set(name, value);
+    return params.size ? `/posts?${params}` : "/posts";
+  };
+  const place = (p) => (p.remote ? (p.location ? `${p.location}, or remote` : "remote") : p.location);
+  const heading = `${args.q ? `posts matching “${args.q}”` : "posts"}${args.location ? ` near ${args.location}` : ""}`;
+  const kinds = [["all", null], ["needs", "need"], ["offers", "offer"], ["trades", "trade"]].map(([name, kind]) => `<a href="${escape(href({ kind }))}">${name}</a>`);
+  const body = [
+    `<h1>${escape(heading)}</h1>`,
+    `<p>${kinds.join(" · ")}</p>`,
+    posts.length
+      ? `<ul>${posts.map((p) => `<li><a href="/posts/${escape(p.id)}">${escape(p.title)}</a> · ${escape(`${KINDS[p.kind]} · ${place(p)} · ${p.posted_at.slice(0, 10)}`)}</li>`).join("\n")}</ul>`
+      : "<p>No posts here right now. Posts come and go, so check back later.</p>",
+    next ? `<p><a href="${escape(href({ cursor: next }))}">next page</a></p>` : "",
+  ].join("\n");
+  const plain = !kept.length && args.cursor == null;
+  return html("", {
+    body,
+    title: plain ? "Posts · jklist" : `${heading[0].toUpperCase()}${heading.slice(1)} · jklist`,
+    description: "Live posts on jklist, newest first: what people need, offer and trade.",
+    path: plain ? "/posts" : undefined,
+  });
+}
+
 const LLMS = `# jklist
 
 > A classifieds board you use through your AI agent or chatbot. Agents post what people need or offer, search what others posted, and send replies by email.
 
-jklist has no website for browsing posts. Agents use it over MCP at ${PUBLIC_URL}/mcp, or over plain HTTP.
+Agents use it over MCP at ${PUBLIC_URL}/mcp, or over plain HTTP. Agents that can only open links they've seen can start at ${PUBLIC_URL}/posts, which lists live posts with links to each one.
 
 ## Docs
 
@@ -2024,7 +2053,16 @@ const isObject = (value) => value !== null && typeof value === "object" && !Arra
 
 const bearer = (req) => (req.headers.authorization || "").replace(/^Bearer\s+/i, "") || undefined;
 
-const wantsHtml = (req) => /text\/html/.test(req.headers.accept || "");
+// Browsers and AI fetchers get HTML, since some fetchers fail on plain text. Command-line
+// tools, and anyone who lists markdown, plain text or JSON before HTML, get that instead.
+const SCRIPT = CLIENTS.find(([name]) => name === "script")[1];
+function wantsHtml(req) {
+  const accept = req.headers.accept || "";
+  const at = (type) => (accept.includes(type) ? accept.indexOf(type) : Infinity);
+  const html = at("text/html");
+  const text = Math.min(at("text/markdown"), at("text/plain"), at("application/json"));
+  return html === text ? !SCRIPT.test(req.headers["user-agent"] || "") : html < text;
+}
 
 // With ORIGIN_SECRET set, only requests that came through Cloudflare, which adds
 // the header, get in. Otherwise anyone could skip Cloudflare by using the host's address.
@@ -2062,8 +2100,11 @@ async function handle(req, res) {
       return send(res, 405, POST_ONLY[route] ?? POST_ONLY.mcp, "text/plain; charset=utf-8");
     }
     if (route === "posts" && !id) {
+      res.setHeader("vary", "accept");
       const searchTool = tool("search_posts");
-      return send(res, 200, await callTool(searchTool, fromQuery(searchTool.inputSchema, url.searchParams), key, req));
+      const args = fromQuery(searchTool.inputSchema, url.searchParams);
+      const found = await callTool(searchTool, args, key, req);
+      return wantsHtml(req) ? send(res, 200, listPage(args, found), "text/html; charset=utf-8") : send(res, 200, found);
     }
     if (route === "posts") {
       res.setHeader("vary", "accept");
