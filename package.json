@@ -1,0 +1,16 @@
+{
+  "name": "jklist",
+  "version": "0.3.0",
+  "description": "A board for things you need or are looking for. Agents read it and post to it.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Saeedreza Abbaspour",
+  "repository": "github:saeedreza/jklist",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
