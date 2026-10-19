@@ -20,6 +20,8 @@ Any post can be removed and any email banned, with or without a reason.
 jklist isn't part of any deal. It has no ads, no fees and no profiles. Nobody
 here checks who people are, holds money or guarantees anything.
 
+jklist is provided as is, with no warranty. You use it at your own risk.
+
 ## staying safe
 
 See it before you pay. Meet in public, tell a friend, and don't invite strangers
@@ -32,13 +34,11 @@ Other signs of a scam: wire transfers, gift cards, cashier's checks or crypto; a
 overpayment and a request to send back the difference; "I'm overseas" or "I'll
 arrange shipping"; fake escrow; requests for your ID or bank details.
 
-jklist is provided as is, with no warranty. You use it at your own risk.
-
 ## what is stored
 
-Your email, your posts and your photos, until a post expires (30 days) or you
-delete it. Deleting your account removes it from the site at once, and from
-backups within 30 days. None of it is sold or shared.
+Your email, until you delete your account. Your posts and photos, until a post
+expires (30 days) or you delete it. Deleting your account removes all of it from
+the site at once, and from backups within 30 days. None of it is sold.
 
 Location and camera details are removed from photos when they're uploaded.
 
@@ -59,15 +59,16 @@ Sentry, an error-tracking service. No posts, searches or emails go with it.
 
 When you reply to a post, the conversation goes through jklist. Each side gets a
 private address at reply.jklist.com, so neither of you sees the other's real
-email. jklist keeps the messages for 90 days after the last one, so it can stop
-spam and abuse, then deletes them. Resend, which carries the email, keeps a copy
-for up to 30 days. Deleting your account deletes your conversations.
+email. Anything you write is passed on as written, signature included. jklist
+keeps the messages for 90 days after the last one, so it can stop spam and
+abuse, then deletes them. Resend, which carries the email, keeps a copy for up
+to 30 days. Deleting your account deletes your conversations.
 
 When a post comes down, its owner can say how it went. Only the answer is kept,
 not who gave it.
 
 ## contact
 
-Report a post with report_post. If someone used your details in a post, or a
+Ask your agent to report a post. If someone used your details in a post, or a
 reply was spam or abuse, email hello@jklist.com. If you lost money, go to the
 police, reportfraud.ftc.gov or ic3.gov.

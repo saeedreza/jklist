@@ -41,6 +41,8 @@ export async function start(settings = {}) {
       ORIGIN_SECRET: "",
       READ_ONLY: "",
       BACKUP_STAMP: "",
+      RELAY_DOMAIN: "",
+      RESEND_WEBHOOK_SECRET: "",
       ADMIN_EMAILS: "admin@example.com",
       ...settings,
     },

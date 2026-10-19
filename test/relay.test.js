@@ -8,6 +8,8 @@ import { api, start } from "./helpers.js";
 
 const SECRET = crypto.randomBytes(24);
 const sent = []; // emails jklist asked Resend to send
+const idempotencyKeys = [];
+let failSends = 0; // how many sends Resend should fail next
 const inbox = new Map(); // received emails Resend would hand back, by id
 
 let resend;
@@ -18,6 +20,12 @@ before(async () => {
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       if (req.method === "POST" && req.url === "/emails") {
+        if (failSends > 0) {
+          failSends--;
+          res.statusCode = 500;
+          return res.end("{}");
+        }
+        idempotencyKeys.push(req.headers["idempotency-key"]);
         sent.push(JSON.parse(body));
         return res.end('{"id":"sent"}');
       }
@@ -97,6 +105,14 @@ test("a conversation goes through private addresses both ways", async () => {
   await webhook("e4");
   assert.equal(lastTo("poster@example.com").text.split("\n\n")[0], "Saturday works.");
 
+  // When Resend can't send, the webhook fails, so Resend delivers it again later.
+  failSends = 1;
+  inbox.set("e5", { from: "asker@example.com", to: [toAsker.reply_to], text: "Still on?", headers: {} });
+  assert.equal((await webhook("e5")).status, 503);
+  assert.equal((await webhook("e5")).status, 200);
+  assert.equal(lastTo("poster@example.com").text.split("\n\n")[0], "Still on?");
+  assert.equal(idempotencyKeys.at(-1), "relay-e5", "a send retried after a timeout can't go out twice");
+
   const count = sent.length;
   await webhook("e1");
   assert.equal(sent.length, count, "a webhook delivered twice is relayed once");
@@ -124,6 +140,7 @@ test("a conversation goes through private addresses both ways", async () => {
       ["you", "Is it still available?"],
       ["them", "Yes! Come Saturday."],
       ["you", "Saturday works."],
+      ["you", "Still on?"],
     ],
   );
   await api(board, "send_message", { conversation: mine[0].id, message: "See you then" }, asker);

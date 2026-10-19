@@ -10,7 +10,7 @@ import zlib from "node:zlib";
 import { api, start, until } from "./helpers.js";
 
 let board;
-before(async () => (board = await start()));
+before(async () => (board = await start({ RELAY_DOMAIN: "reply.test" })));
 after(() => board.stop());
 
 const call = (name, args, key, server = board) => api(server, name, args, key);
@@ -245,6 +245,7 @@ test("the contact needs a key, and a post has a page you can share", async () =>
     title: "Drummer wanted",
     body: "Bring sticks.\n\n# Not a heading <b>loud</b>\nDemo: https://example.com/demo.",
     contact: "call 555-0100",
+    images: ["https://example.com/drums.jpg"],
   });
   const reader = await signIn("reader@example.com");
 
@@ -263,6 +264,8 @@ test("the contact needs a key, and a post has a page you can share", async () =>
     page.includes('<p># Not a heading &lt;b&gt;loud&lt;/b&gt;<br>Demo: <a href="https://example.com/demo" rel="ugc nofollow">https://example.com/demo</a>.</p>'),
     "what people write stays text, and its links are marked as theirs",
   );
+  assert.ok(page.includes('<a href="https://example.com/drums.jpg" rel="ugc nofollow">'), "a photo on another site stays a link");
+  assert.ok(!page.includes("<img"), "and is never loaded by the page");
   assert.ok(!page.includes("555-0100"), "the page never shows the contact");
 });
 
@@ -295,9 +298,13 @@ test("publishing the same post twice returns the first one", async () => {
   assert.equal(again.id, first.id);
   assert.equal(again.duplicate, true);
   assert.equal((await call("my_posts", {}, key)).body.posts.length, 1);
+
+  const moved = await call("publish_post", { kind: "offer", title: "Bike for sale", body: "Blue", location: "Pasadena, CA" }, key);
+  assert.equal(moved.status, 400, "the same post with other details is a correction");
+  assert.match(moved.body.error, new RegExp(`as ${first.id}; to change it, call update_post`));
 });
 
-test("replies go to the poster by email, with the sender's address to answer", async () => {
+test("replies reach the poster by email, from a private address", async () => {
   const owner = await signIn("lamp-owner@example.com");
   const { id } = await post(owner, { title: "Brass lamp" });
   const asker = await signIn("asker@example.com");
@@ -305,7 +312,8 @@ test("replies go to the poster by email, with the sender's address to answer", a
   assert.equal((await call("reply_to_post", { id, message: "Is it still available?" }, owner)).status, 400, "not to your own post");
   const sent = await call("reply_to_post", { id, message: "Is it still available?" }, asker);
   assert.equal(sent.body.sent, true);
-  assert.match(board.output(), /would email lamp-owner@example\.com, reply-to asker@example\.com\]\nReply to your jklist post: Brass lamp/);
+  assert.match(board.output(), /would email lamp-owner@example\.com, reply-to a-[0-9a-f]{24}@reply\.test\]\nReply to your jklist post: Brass lamp/);
+  assert.ok(!board.output().includes("reply-to asker@example.com"), "the poster never gets the asker's address");
   assert.equal((await call("my_posts", {}, owner)).body.posts[0].replies, 1);
 
   await call("reply_to_post", { id, message: "Hello?" }, asker);
@@ -316,6 +324,28 @@ test("replies go to the poster by email, with the sender's address to answer", a
   const { id: other } = await post(owner, { title: "Brass candlestick" });
   const burst = await Promise.all(Array.from({ length: 8 }, (_, n) => call("reply_to_post", { id: other, message: `Offer ${n}` }, asker)));
   assert.equal(burst.filter((r) => r.status === 200).length, 3);
+});
+
+test("without a relay domain, replies are off rather than showing anyone's address", async () => {
+  const plain = await start();
+  const keyFor = async (email) => (await call("sign_in", { email, code: await requestCode(email, plain) }, undefined, plain)).body.key;
+  const owner = await keyFor("plain-owner@example.com");
+  const { id } = (await call("publish_post", { kind: "offer", title: "Chair", remote: true }, owner, plain)).body;
+  const sent = await call("reply_to_post", { id, message: "Still there?" }, await keyFor("plain-asker@example.com"), plain);
+  plain.stop();
+  assert.equal(sent.status, 503);
+  assert.match(sent.body.error, /^error: replies by email aren't set up/);
+});
+
+test("a search in a neighborhood shows that neighborhood before the rest of the area", async () => {
+  const key = await signIn("rooms@example.com");
+  const mission = await post(key, { title: "Room for rent", body: "Sunny, near the park", location: "Mission District, San Francisco, CA" });
+  const paloAlto = await post(key, { title: "Room for rent in a shared house", body: "Quiet street", location: "Palo Alto, CA" });
+  for (const args of [{ q: "room", location: "the Mission" }, { location: "the Mission" }]) {
+    const ids = (await call("search_posts", args)).body.posts.map((p) => p.id);
+    assert.ok(ids.includes(paloAlto.id), "the rest of the area still shows");
+    assert.ok(ids.indexOf(mission.id) < ids.indexOf(paloAlto.id), `${JSON.stringify(args)}: the Mission first, though Palo Alto is newer`);
+  }
 });
 
 test("updating, renewing and closing posts", async () => {
@@ -453,6 +483,7 @@ test("uploads lose their metadata, belong to their owner, and go when no post us
   const second = await post(key, { title: "Lamp, again", images: [jpg] });
   const page = await fetch(`${board.base}/posts/${first.id}`, { headers: { accept: "text/html" } }).then((r) => r.text());
   assert.ok(page.includes(`<meta property="og:image" content="${jpg}">`), "the shared page previews the first photo");
+  assert.ok(page.includes(`<img src="/images/${jpg.split("/images/")[1]}" alt="Lamp">`), "and shows the photos uploaded here");
 
   await call("update_post", { id: first.id, images: [jpg] }, key);
   assert.equal((await fetch(png)).status, 404, "a photo taken off a post is deleted");

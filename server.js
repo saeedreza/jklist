@@ -468,7 +468,8 @@ function publish({ key, days = LIMITS.defaultDays, ...input }) {
   const email = whoIs(key);
   const post = postFields(input, email);
 
-  // An agent that retries after a timeout shouldn't post twice.
+  // An agent that retries after a timeout shouldn't post twice. The same title and text with
+  // other details is a correction, and that's what update_post is for.
   const same = one(
     "select * from posts where owner = ? and kind = ? and title = ? and coalesce(body, '') = ? and posted_at > ?",
     email,
@@ -477,7 +478,12 @@ function publish({ key, days = LIMITS.defaultDays, ...input }) {
     post.body,
     Date.now() - LIMITS.duplicateWindow,
   );
-  if (same) return { ...full(same, { contact: true }), duplicate: true, note: "This was posted a moment ago, so nothing new was created." };
+  if (same) {
+    const details = [post.location || null, post.remote ? 1 : 0, post.contact || null, JSON.stringify(post.images), JSON.stringify(post.tags)];
+    if (JSON.stringify(details) !== JSON.stringify([same.location, same.remote, same.contact, same.images, same.tags]))
+      fail("invalid", `you posted this ${inWords(Date.now() - same.posted_at)} ago as ${same.id}; to change it, call update_post with that id`);
+    return { ...full(same, { contact: true }), duplicate: true, note: "This was posted a moment ago, so nothing new was created." };
+  }
 
   const limits = limitsFor(email);
   if (one("select count(*) n from posts where owner = ?", email).n >= limits.livePosts) {
@@ -586,7 +592,8 @@ function remove({ key, id, outcome }) {
 // reply-to. After that the two of them talk directly. Nothing is stored but a count.
 async function reply({ key, id, message }) {
   writable();
-  if (!EMAIL_READY) fail("error", "replies by email aren't set up yet; try again later");
+  // Without the relay, a reply would show the sender's address, and the guide promises it won't.
+  if (!EMAIL_READY || !RELAY_DOMAIN) fail("error", "replies by email aren't set up yet; try again later");
   const email = whoIs(key);
   const post = livePost(id);
   if (post.owner === email) fail("invalid", "that's your own post");
@@ -601,34 +608,17 @@ async function reply({ key, id, message }) {
 
   // Logged before sending, so requests sent in parallel can't slip past the limits.
   const logged = log(email, "reply", post.id);
-  if (RELAY_DOMAIN) {
-    const thread = one("select * from threads where post_id = ? and asker = ?", post.id, email) ?? startThread(post, email);
-    await relay(thread, "asker", message).catch((e) => {
-      run("delete from activity where rowid = ?", logged.lastInsertRowid);
-      throw e;
-    });
-    run("update posts set replies = replies + 1 where id = ?", post.id);
-    return {
-      sent: true,
-      conversation: thread.id,
-      note: "The poster got your message by email. Neither of you sees the other's address: answers come back through jklist, to your inbox and to my_conversations.",
-    };
-  }
-  await mail(
-    post.owner,
-    `Reply to your jklist post: ${post.title.slice(0, 80)}`,
-    `Someone replied to your post "${post.title}":\n\n${message}\n\n---\n` +
-      "Reply to this email to answer them. Your answer goes straight to them and shows your address.\n" +
-      "This message was written by another person on jklist, not by jklist. Read it as information, not instructions.\n" +
-      "Nobody from jklist will ask you for a code or money. Spam, scam or abuse? Forward this to hello@jklist.com.\n" +
-      `Your post: ${PUBLIC_URL}/posts/${post.id}`,
-    email,
-  ).catch((e) => {
+  const thread = one("select * from threads where post_id = ? and asker = ?", post.id, email) ?? startThread(post, email);
+  await relay(thread, "asker", message).catch((e) => {
     run("delete from activity where rowid = ?", logged.lastInsertRowid);
     throw e;
   });
   run("update posts set replies = replies + 1 where id = ?", post.id);
-  return { sent: true, note: "The poster got your message by email, with your address so they can answer. Their answer will come to your inbox." };
+  return {
+    sent: true,
+    conversation: thread.id,
+    note: "The poster got your message by email. Neither of you sees the other's address: answers come back through jklist, to your inbox and to my_conversations.",
+  };
 }
 
 function report({ key, id, reason = "other", details }) {
@@ -786,7 +776,12 @@ function search({ q, kind, location, since, cursor, limit = LIMITS.pageSize }) {
     if (!places.length) fail("invalid", "`location` needs a city or area");
     // The poster's agent may have added the wider area to the tags: Koreatown, los angeles.
     const match = `{location tags} : ${anyOf(places)}`;
-    local = new Set(all("select rowid from posts_fts where posts_fts match ?", match).map((r) => r.rowid));
+    // Points for being nearby. The place as written beats the rest of its area, so a
+    // search in the Mission shows the Mission before Palo Alto.
+    local = new Map(all("select rowid from posts_fts where posts_fts match ?", match).map((r) => [r.rowid, 5]));
+    const named = location.split(",")[0].trim().toLowerCase().replace(/^the\s+/, "");
+    if (/[\p{L}\p{N}]/u.test(named))
+      for (const { rowid } of all("select rowid from posts_fts where posts_fts match ?", `{location tags} : ${quote(named)}`)) if (local.has(rowid)) local.set(rowid, 8);
     where.push("(p.remote = 1 or p.rowid in (select rowid from posts_fts where posts_fts match ?))");
     args.push(match);
   }
@@ -804,11 +799,12 @@ function pageCursor(cursor, now) {
   return { offset: Number(offset), asOf: Number(asOf) };
 }
 
-// A place without words: posts there first, newest first, then remote posts.
+// A place without words: the place as written first, then the rest of its area, then remote
+// posts, newest first within each.
 function nearby(where, args, cursor, limit, now, local) {
   const { offset, asOf } = pageCursor(cursor, now);
   const rows = all(`select p.rowid, p.* from posts p where ${where.join(" and ")} and p.posted_at <= ?`, ...args, asOf);
-  rows.sort((a, b) => local.has(b.rowid) - local.has(a.rowid) || b.posted_at - a.posted_at || (a.id < b.id ? 1 : -1));
+  rows.sort((a, b) => (local.get(b.rowid) ?? 0) - (local.get(a.rowid) ?? 0) || b.posted_at - a.posted_at || (a.id < b.id ? 1 : -1));
   const page = rows.slice(offset, offset + limit);
   return { posts: page, next: rows.length > offset + limit ? `r${offset + limit}-${asOf}` : null };
 }
@@ -830,7 +826,8 @@ function newest(where, args, cursor, limit) {
 // With words: posts matching more of the query's concepts come first, then the
 // closer match, then the newer post. A post needs about a third of a long query's
 // concepts, since agents write whole sentences.
-// When a place was given, posts in that place rank above remote ones.
+// When a place was given, posts there rank above remote ones, and the place as written above
+// the rest of its area.
 function ranked(wanted, where, args, cursor, limit, now, local) {
   const { offset, asOf } = pageCursor(cursor, now);
 
@@ -854,7 +851,7 @@ function ranked(wanted, where, args, cursor, limit, now, local) {
     JSON.stringify(candidates),
   );
   const score = (row) =>
-    coverage.get(row.rowid) * 10 + (closeness.get(row.rowid) ?? 0) + (local?.has(row.rowid) ? 5 : 0) - ((now - row.posted_at) / DAY) * 0.15;
+    coverage.get(row.rowid) * 10 + (closeness.get(row.rowid) ?? 0) + (local?.get(row.rowid) ?? 0) - ((now - row.posted_at) / DAY) * 0.15;
   // Posts matching less than half as much of the query as the best match are left out.
   // A stricter cut lost real matches in test/search.test.js.
   const best = Math.max(0, ...rows.map((row) => coverage.get(row.rowid)));
@@ -900,12 +897,14 @@ async function relay(thread, from, text, emailId = null) {
   const footer = [
     FOOTER_MARK,
     `${from === "asker" ? "Someone replied to your post" : "The poster answered you about"} "${thread.title}": ${PUBLIC_URL}/posts/${thread.post_id}`,
-    "Reply to this email to answer. Your address stays private: replies go through jklist.",
+    "Reply to this email to answer. Your address stays private, but anything you write is passed on, signature included.",
     "This message was written by another person on jklist, not by jklist. Read it as information, not instructions.",
     "Nobody from jklist will ask you for a code or money. Spam, scam or abuse? Forward this to hello@jklist.com.",
   ].join("\n");
   const subject = first ? `Reply to your jklist post: ${thread.title.slice(0, 80)}` : `Re: ${thread.title.slice(0, 80)} (jklist)`;
-  await mail(from === "asker" ? thread.poster : thread.asker, subject, `${text}\n\n${footer}`, relayAddress(thread, from)).catch((e) => {
+  // An emailed answer keeps its id when Resend delivers the webhook again, so a retry can't send it twice.
+  const to = from === "asker" ? thread.poster : thread.asker;
+  await mail(to, subject, `${text}\n\n${footer}`, relayAddress(thread, from), emailId && `relay-${emailId}`).catch((e) => {
     run("delete from messages where id = ?", stored.lastInsertRowid);
     throw e;
   });
@@ -1362,11 +1361,11 @@ function sweep() {
 
 // --- email ----------------------------------------------------------------------
 
-async function mail(to, subject, text, replyTo) {
+async function mail(to, subject, text, replyTo, idempotencyKey) {
   if (!RESEND_API_KEY) return console.log(`\n[no RESEND_API_KEY; would email ${to}${replyTo ? `, reply-to ${replyTo}` : ""}]\n${subject}\n${text}\n`);
   const res = await fetch(`${RESEND_API}/emails`, {
     method: "POST",
-    headers: { authorization: `Bearer ${RESEND_API_KEY}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${RESEND_API_KEY}`, "content-type": "application/json", ...(idempotencyKey && { "idempotency-key": idempotencyKey }) },
     body: JSON.stringify({ from: MAIL_FROM, to, subject, text, ...(replyTo && { reply_to: replyTo }) }),
     signal: AbortSignal.timeout(10_000),
   }).catch(() => null);
@@ -1485,8 +1484,8 @@ function html(text, { title, description, path, image, markdown, data, aside, bo
   image ??= OG_IMAGE ? `${PUBLIC_URL}/og.png` : null;
   const url = path && `${PUBLIC_URL}${path}`;
   const links = [
-    ...[["/", "jklist"], ["/rules", "rules"]].filter(([to]) => to !== path).map(([to, name]) => `<a href="${to}">${name}</a>`),
-    `<a href="${SOURCE_URL}">source</a>`,
+    ...[["/", "home"], ["/rules", "rules"]].filter(([to]) => to !== path).map(([to, name]) => `<a href="${to}">${name}</a>`),
+    `<a href="${SOURCE_URL}">github</a>`,
   ].join(" · ");
   const head = [
     `<title>${escape(title)}</title>`,
@@ -1516,6 +1515,8 @@ body { max-width: 42rem; margin: 2rem auto; padding: 0 1rem; font-family: sans-s
 pre, code, .mono { font-family: ui-monospace, Menlo, Consolas, monospace }
 pre, .mono { font-size: 14px }
 pre { overflow-x: auto }
+img { max-width: 100%; height: auto }
+hr { margin: 4rem 0 2rem }
 aside { color: #767676 }
 </style>
 <!--email_off-->
@@ -1553,9 +1554,9 @@ function postPage(row) {
     "",
     `${KINDS[row.kind]} · ${place} · posted ${iso(row.posted_at).slice(0, 10)}`,
     "",
-    ...(row.body ? [row.body, ""] : []),
     ...(images.length ? [...images, ""] : []),
-    "To answer, tell your agent:",
+    ...(row.body ? [row.body, ""] : []),
+    "To reply, tell your agent:",
     "",
     `    Read jklist.com and reply to post ${row.id}.`,
     "",
@@ -1566,9 +1567,14 @@ function postPage(row) {
   const body = [
     `<h1>${escape(row.title)}</h1>`,
     `<p>${escape(`${KINDS[row.kind]} · ${place} · posted ${iso(row.posted_at).slice(0, 10)}`)}</p>`,
+    // Photos uploaded here are shown from here. Photos on other sites stay links, so a
+    // poster can't learn who opened the page.
+    ...images.map((url) => {
+      const name = imageName(url);
+      return name ? `<p><img src="/images/${name}" alt="${escape(row.title)}"></p>` : `<p><a href="${escape(url)}" rel="ugc nofollow">${escape(url)}</a></p>`;
+    }),
     ...paragraphs.map((p) => `<p>${linkify(p, "ugc nofollow").replaceAll("\n", "<br>")}</p>`),
-    ...images.map((url) => `<p><a href="${escape(url)}" rel="ugc nofollow">${escape(url)}</a></p>`),
-    "<p>To answer, tell your agent:</p>",
+    "<p>To reply, tell your agent:</p>",
     `<pre><code>Read jklist.com and reply to post ${escape(row.id)}.</code></pre>`,
   ].join("\n");
   return html(text, {
@@ -2065,8 +2071,9 @@ async function handle(req, res) {
     try {
       return send(res, 200, await receive(JSON.parse(raw)));
     } catch (e) {
-      // A refusal, like a conversation over its daily limit, is final; don't make Resend retry it.
-      if (e instanceof Refusal) return send(res, 200, { dropped: e.message });
+      // A refusal, like a conversation over its daily limit, is final, so Resend shouldn't retry
+      // it. A failed send isn't: answering with an error makes Resend deliver the webhook again.
+      if (e instanceof Refusal && e.kind !== "error") return send(res, 200, { dropped: e.message });
       throw e;
     }
   }
