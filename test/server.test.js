@@ -143,6 +143,7 @@ test("public documents share the same standalone, script-free presentation", asy
   for (const address of ["/agents", "/connect", "/about", "/faq", "/rules", "/posts", "/mcp", "/nope", "/posts/no-such-post"]) {
     const response = await fetch(`${board.base}${address}`, { headers: { accept: "text/html" } });
     assert.match(response.headers.get("content-type"), /^text\/html/);
+    assert.match(response.headers.get("cache-control"), /\bno-transform\b/, "proxies must preserve the script-free document");
     const page = await response.text();
     assertPlainDocument(page);
     assert.equal(withoutCurrentPage(pageHeader(page)), withoutCurrentPage(pageHeader(home)), "the same navigation is available on every public page");
